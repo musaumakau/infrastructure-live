@@ -1,5 +1,5 @@
 terraform {
-  source = "git@github.com:musaumakau/infrastructure-modules.git//eks?ref=eks-v0.0.1"
+source = "git::https://${REPO_DISPATCH_PAT}@github.com/musaumakau/infrastructure-modules.git//eks?ref=eks-v0.0.1"
 
 }
 
