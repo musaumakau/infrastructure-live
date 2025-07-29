@@ -1,0 +1,53 @@
+name: Terragrunt Deploy
+
+on:
+  repository_dispatch:
+    types: [trigger-deploy]  # Triggered from infra-modules repo
+  workflow_dispatch:  # Manual trigger via GitHub UI
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy Terragrunt Infra
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: Dev  # Adjust this if you're deploying Prod or Staging
+
+    steps:
+      - name: Checkout Live Infra
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
+          aws-region: eu-west-1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Install Terragrunt
+        run: |
+          curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/latest/download/terragrunt_linux_amd64
+          chmod +x terragrunt
+          sudo mv terragrunt /usr/local/bin/
+
+      - name: Format Check (Terragrunt)
+        run: terragrunt hclfmt --terragrunt-check || true  # not failing pipeline yet
+
+      - name: Terragrunt Validate
+        run: terragrunt run-all validate
+
+      - name: Terragrunt Plan
+        run: terragrunt run-all plan --terragrunt-non-interactive
+
+      - name: Terragrunt Apply
+        run: terragrunt run-all apply --terragrunt-non-interactive --terragrunt-include-external-dependencies -auto-approve
