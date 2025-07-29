@@ -1,5 +1,5 @@
-terraform{
-    source = "git@github.com:musaumakau/infrastructure-modules.git//kubernetes-addons?ref=kubernetes-addons-v0.0.1"
+terraform {
+source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//eks?ref=eks-v0.0.1"
 }
 
 include "root" {
