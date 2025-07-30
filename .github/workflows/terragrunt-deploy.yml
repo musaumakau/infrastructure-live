@@ -43,10 +43,15 @@ jobs:
       - name: Format Check (Terragrunt)
         run: terragrunt hclfmt --terragrunt-check || true # not failing pipeline yet
       
-      - name: Initialize and Validate Terragrunt
+      - name: Initialize Terragrunt Modules
         run: |
-          terragrunt run-all init --upgrade
-          terragrunt validate --all
+          # Initialize each module in dependency order
+          (cd vpc && terragrunt init --upgrade)
+          (cd eks && terragrunt init --upgrade)
+          (cd kubernetes-addons && terragrunt init --upgrade)
+      
+      - name: Validate Terragrunt Modules
+        run: terragrunt validate --all
       
       - name: Terragrunt Plan
         run: terragrunt run-all plan --terragrunt-non-interactive
