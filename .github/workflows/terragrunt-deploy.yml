@@ -42,8 +42,10 @@ jobs:
       - name: Format Check (Terragrunt)
         run: terragrunt hclfmt --terragrunt-check || true # not failing pipeline yet
         
-      - name: Terragrunt Validate
-        run: terragrunt validate --all  # Updated command as warned
+      - name: Initialize and Validate Terragrunt
+        run: |
+          terragrunt init --upgrade
+          terragrunt validate --all
         
       - name: Terragrunt Plan
         run: terragrunt run-all plan --terragrunt-non-interactive
