@@ -13,42 +13,43 @@ jobs:
     name: Deploy Terragrunt Infra
     runs-on: ubuntu-latest
     env:
-      REPO_DISPATCH_PAT: ${{ secrets.REPO_DISPATCH_PAT }}  # Add this line
+      REPO_DISPATCH_PAT: ${{ secrets.REPO_DISPATCH_PAT }}
     defaults:
       run:
         shell: bash
         working-directory: Dev # Adjust this if you're deploying Prod or Staging
+    
     steps:
       - name: Checkout Live Infra
         uses: actions/checkout@v4
-        
+      
       - name: Configure AWS Credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
           aws-region: eu-west-1
-          
+      
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.7.5
-          
+      
       - name: Install Terragrunt
         run: |
           curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/latest/download/terragrunt_linux_amd64
           chmod +x terragrunt
           sudo mv terragrunt /usr/local/bin/
-          
+      
       - name: Format Check (Terragrunt)
         run: terragrunt hclfmt --terragrunt-check || true # not failing pipeline yet
-        
+      
       - name: Initialize and Validate Terragrunt
         run: |
-          terragrunt init --upgrade
+          terragrunt run-all init --upgrade
           terragrunt validate --all
-        
+      
       - name: Terragrunt Plan
         run: terragrunt run-all plan --terragrunt-non-interactive
-        
+      
       - name: Terragrunt Apply
-        run: terragrunt run-all apply --terragrunt-non-interactive --terragrunt-include-external-dependencies -auto-approve
+        run: terragrunt run-all apply --terragrunt-non-interactive --terragrunt-include-external-dependencies --auto-approve
