@@ -1,14 +1,14 @@
 terraform {
-source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//vpc?ref=vpc-v0.0.1-patch"
+  source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//vpc?ref=vpc-v0.0.1-patch"
 }
 
-include "root"{
-    path = find_in_parent_folders("root.hcl")
+include "root" {
+  path = find_in_parent_folders("root.hcl")
 }
 
 include "env" {
-  path = find_in_parent_folders("env.hcl")
-  expose = true
+  path           = find_in_parent_folders("env.hcl")
+  expose         = true
   merge_strategy = "no_merge"
 }
 
@@ -24,11 +24,11 @@ inputs = {
 
   private_subnet_tags = {
     "kubernetes.io/role/internal-elb" = 1
-    "kubernetes.io/cluster/Dev"   = "owned"
+    "kubernetes.io/cluster/Dev"       = "owned"
   }
 
   public_subnet_tags = {
-    "kubernetes.io/role/elb"        = 1
+    "kubernetes.io/role/elb"    = 1
     "kubernetes.io/cluster/Dev" = "owned"
   }
 }

@@ -1,39 +1,39 @@
 terraform {
-source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//kubernetes-addons?ref=kubernetes-addons-v0.0.1-patch"
+  source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//kubernetes-addons?ref=kubernetes-addons-v0.0.1-patch"
 }
 
 include "root" {
-    path = find_in_parent_folders("root.hcl")
+  path = find_in_parent_folders("root.hcl")
 }
 
 include "env" {
-    path  = find_in_parent_folders("env.hcl")
-    expose = true
-    merge_strategy = "no_merge"
+  path           = find_in_parent_folders("env.hcl")
+  expose         = true
+  merge_strategy = "no_merge"
 }
 
 inputs = {
-    env =  include.env.locals.env
-    eks_name = dependency.eks.outputs.eks_name
-    openid_provider_arn = dependency.eks.outputs.openid_provider_arn
+  env                 = include.env.locals.env
+  eks_name            = dependency.eks.outputs.eks_name
+  openid_provider_arn = dependency.eks.outputs.openid_provider_arn
 
-    enable_cluster_autoscaler  =  true
-    cluster_autoscaler_helm_version = "9.48.0"
+  enable_cluster_autoscaler       = true
+  cluster_autoscaler_helm_version = "9.48.0"
 }
 
-dependency "eks"{
-    config_path = "../eks"
+dependency "eks" {
+  config_path = "../eks"
 
-    mock_outputs = {
-        eks_name = "demo"
-        openid_provider_arn = "arn:aws:iam::123456789012:oidc-provider"
-    }
+  mock_outputs = {
+    eks_name            = "demo"
+    openid_provider_arn = "arn:aws:iam::123456789012:oidc-provider"
+  }
 }
 
 generate "helm_provider" {
-  path       = "helm_provider.tf"
-  if_exists  = "overwrite_terragrunt"
-  contents   = <<EOF
+  path      = "helm_provider.tf"
+  if_exists = "overwrite_terragrunt"
+  contents  = <<EOF
 
 data "aws_eks_cluster" "eks" {
   name = var.eks_name
