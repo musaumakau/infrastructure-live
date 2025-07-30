@@ -1,5 +1,5 @@
 terraform {
-source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//vpc?ref=vpc-v0.0.1"
+source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//vpc?ref=vpc-v0.0.1-patch"
 }
 
 include "root"{
