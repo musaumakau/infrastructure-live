@@ -22,10 +22,6 @@ generate "provider" {
 provider "aws" {
         region = "eu-west-1"
 
-        assume_role {
-            session_name = "test"
-            role_arn = "arn:aws:iam::649203810550:role/EksOIDCRole"
-        }
     }
     EOF
 
