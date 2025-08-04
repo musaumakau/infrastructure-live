@@ -24,6 +24,11 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
           aws-region: eu-west-1
+          
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+            terraform_version: 1.7.5    
 
       - name: Install Terragrunt
         run: |
