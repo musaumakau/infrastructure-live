@@ -19,11 +19,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up AWS credentials
+      - name: Configure AWS Credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::<account-id>:role/<your-cicd-role>
-          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
+          aws-region: eu-west-1
 
       - name: Install Terragrunt
         run: |
