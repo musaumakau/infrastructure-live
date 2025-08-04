@@ -33,12 +33,13 @@ jobs:
 
       - name: Destroy kubernetes-addons
         working-directory: Dev/kubernetes-addons
-        run: terragrunt run-all destroy -auto-approve
+        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+
 
       - name: Destroy EKS
         working-directory: Dev/eks
-        run: terragrunt run-all destroy -auto-approve
+        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
 
       - name: Destroy VPC
         working-directory: Dev/vpc
-        run: terragrunt run-all destroy -auto-approve
+        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
