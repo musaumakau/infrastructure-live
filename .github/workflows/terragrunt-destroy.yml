@@ -32,13 +32,13 @@ jobs:
           sudo mv terragrunt /usr/local/bin/
 
       - name: Destroy kubernetes-addons
-        working-directory: path/to/kubernetes-addons
+        working-directory: infrastructure-live/Dev/kubernetes-addons
         run: terragrunt run-all destroy -auto-approve
 
       - name: Destroy EKS
-        working-directory: path/to/eks
+        working-directory: infrastructure-live/Dev/eks
         run: terragrunt run-all destroy -auto-approve
 
       - name: Destroy VPC
-        working-directory: path/to/vpc
+        working-directory: infrastructure-live/Dev/vpc
         run: terragrunt run-all destroy -auto-approve
