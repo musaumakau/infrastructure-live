@@ -3,6 +3,11 @@ name: Destroy Infra
 on:
   workflow_dispatch:  # manual trigger from GitHub UI
 
+
+
+permissions:
+        id-token: write
+        contents: read
 jobs:
   destroy:
     runs-on: ubuntu-latest
