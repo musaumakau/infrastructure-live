@@ -51,42 +51,21 @@ jobs:
       - name: Validate Terragrunt Modules
         run: terragrunt validate --all
       
-      - name: Plan All Modules
-        run: terragrunt run-all plan --terragrunt-non-interactive
-      
-      - name: Deploy VPC
+      - name: Plan VPC
         run: |
           cd vpc
-          terragrunt apply --auto-approve --terragrunt-non-interactive
-      
-      - name: Deploy EKS Cluster
-        run: |
-          cd eks  
-          terragrunt apply --auto-approve --terragrunt-non-interactive
-      
-      - name: Wait for EKS Cluster to be Ready
+          terragrunt plan --terragrunt-non-interactive
+
+      - name: Plan EKS
         run: |
           cd eks
-          # Get cluster name from Terragrunt output or use default
-          CLUSTER_NAME=$(terragrunt output -raw cluster_name 2>/dev/null || echo "demo")
-          echo "Waiting for EKS cluster $CLUSTER_NAME to be active..."
-          aws eks wait cluster-active --name $CLUSTER_NAME --region eu-west-1
-          echo "EKS cluster is now active"
-      
-      - name: Verify Infrastructure Before Addons
-        run: |
-          echo "=== Verifying EKS Clusters ==="
-          aws eks list-clusters --region eu-west-1
-          
-          echo "=== Verifying OIDC Providers ==="
-          aws iam list-open-id-connect-providers
-          
-          echo "=== EKS Cluster Details ==="
-          cd eks
-          CLUSTER_NAME=$(terragrunt output -raw cluster_name 2>/dev/null || echo "demo")
-          aws eks describe-cluster --name $CLUSTER_NAME --region eu-west-1 --query 'cluster.{Name:name,Status:status,OidcIssuerUrl:identity.oidc.issuer}'
-      
-      - name: Deploy Kubernetes Addons
+          terragrunt plan --terragrunt-non-interactive
+
+      - name: Plan Kubernetes Addons
         run: |
           cd kubernetes-addons
-          terragrunt apply --auto-approve --terragrunt-non-interactive
+          terragrunt plan --terragrunt-non-interactive
+        continue-on-error: true  # Allow this to fail during initial deployment
+      
+      - name: Terragrunt Apply
+        run: terragrunt run-all apply --terragrunt-non-interactive --terragrunt-include-external-dependencies --auto-approve
