@@ -32,9 +32,10 @@ jobs:
           echo "Removing all .terraform.lock.hcl files..."
           find . -name ".terraform.lock.hcl" -type f -delete
           echo "Lock files removed successfully"
-      - name: Destroy kubernetes-addons
-        working-directory: Dev/kubernetes-addons
-        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+      # Skip kubernetes-addons since EKS cluster was manually destroyed
+      # - name: Destroy kubernetes-addons
+      #   working-directory: Dev/kubernetes-addons
+      #   run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
       - name: Destroy EKS
         working-directory: Dev/eks
         run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
