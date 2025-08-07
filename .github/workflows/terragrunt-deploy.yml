@@ -77,12 +77,13 @@ jobs:
         run: |
           cd eks
           terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
-
+          
       - name: Configure Kubeconfig
         run: |
-          CLUSTER_NAME=$(terraform -chdir=eks output -raw cluster_name)
-          REGION=$(terraform -chdir=eks output -raw region)
-          aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+            CLUSTER_NAME=$(terragrunt output -raw cluster_name --terragrunt-working-dir eks)
+            REGION=$(terragrunt output -raw region --terragrunt-working-dir eks)
+            aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+
 
       - name: Apply Kubernetes Addons
         run: |
