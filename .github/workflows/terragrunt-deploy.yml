@@ -67,5 +67,5 @@ jobs:
           terragrunt plan --terragrunt-non-interactive
         continue-on-error: true  # Allow this to fail during initial deployment
       
-      - name: Terragrunt Apply
-        run: terragrunt run-all apply --terragrunt-non-interactive --terragrunt-include-external-dependencies --auto-approve
+      # - name: Terragrunt Apply
+      #   run: terragrunt run-all apply --terragrunt-non-interactive --terragrunt-include-external-dependencies --auto-approve
