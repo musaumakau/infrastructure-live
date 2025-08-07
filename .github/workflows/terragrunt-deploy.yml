@@ -66,6 +66,29 @@ jobs:
           cd kubernetes-addons
           terragrunt plan --non-interactive
         continue-on-error: true  
-      
-      - name: Terragrunt Apply
-        run: terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
+
+
+      - name: Apply VPC
+        run: |
+          cd vpc
+          terragrunt apply --non-interactive --auto-approve
+
+      - name: Apply EKS
+        run: |
+          cd eks
+          terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
+
+      - name: Configure Kubeconfig
+        run: |
+          CLUSTER_NAME=$(terraform -chdir=eks output -raw cluster_name)
+          REGION=$(terraform -chdir=eks output -raw region)
+          aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+
+      - name: Apply Kubernetes Addons
+        run: |
+          cd kubernetes-addons
+          terragrunt apply --non-interactive --auto-approve
+          
+            
+        # - name: Terragrunt Apply
+        #   run: terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
