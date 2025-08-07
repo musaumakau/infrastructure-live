@@ -80,7 +80,7 @@ jobs:
           
       - name: Configure Kubeconfig
         run: |
-            CLUSTER_NAME=$(terragrunt output -raw cluster_name --terragrunt-working-dir eks)
+            CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
             REGION=$(terragrunt output -raw region --terragrunt-working-dir eks)
             aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
 
