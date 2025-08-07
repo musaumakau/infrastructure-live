@@ -54,18 +54,18 @@ jobs:
       - name: Plan VPC
         run: |
           cd vpc
-          terragrunt plan --terragrunt-non-interactive
+          terragrunt plan --non-interactive
 
       - name: Plan EKS
         run: |
           cd eks
-          terragrunt plan --terragrunt-non-interactive
+          terragrunt plan --non-interactive
 
       - name: Plan Kubernetes Addons
         run: |
           cd kubernetes-addons
-          terragrunt plan --terragrunt-non-interactive
-        continue-on-error: true  # Allow this to fail during initial deployment
+          terragrunt plan --non-interactive
+        continue-on-error: true  
       
       - name: Terragrunt Apply
-        run: terragrunt run-all apply --terragrunt-non-interactive --terragrunt-include-external-dependencies --auto-approve
+        run: terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
