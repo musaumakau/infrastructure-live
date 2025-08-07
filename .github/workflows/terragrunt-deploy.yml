@@ -82,7 +82,7 @@ jobs:
         run: |
             CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
             REGION=$(terragrunt output -raw region --terragrunt-working-dir eks)
-            aws eks update-kubeconfig --name $CLUSTER_NAME --region $REGION
+            aws eks update-kubeconfig --name $CLUSTER_NAME --region "${AWS_REGION}"
 
 
       - name: Apply Kubernetes Addons
