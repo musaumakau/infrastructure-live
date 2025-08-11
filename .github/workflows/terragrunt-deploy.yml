@@ -39,7 +39,7 @@ jobs:
           sudo mv terragrunt /usr/local/bin/
       
       - name: Format Check (Terragrunt)
-        run: terragrunt hclfmt --terragrunt-check || true # not failing pipeline yet
+        run: terragrunt hcl format --terragrunt-check || true # not failing pipeline yet
       
       - name: Initialize Terragrunt Modules
         run: |
