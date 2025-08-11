@@ -17,6 +17,7 @@ inputs = {
   eks_version = "1.33"
   env         = include.env.locals.env
   eks_name    = "demo"
+  vpc_id      = dependency.vpc.outputs.vpc_id
   subnet_ids  = dependency.vpc.outputs.private_subnet_ids
 
 
