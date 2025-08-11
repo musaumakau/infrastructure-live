@@ -31,7 +31,7 @@ inputs = {
         min_size     = 0
       }
     }
-    
+
   }
 }
 
