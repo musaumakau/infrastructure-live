@@ -77,12 +77,31 @@ jobs:
         run: |
           cd eks
           terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
-          
+
+
       - name: Configure Kubeconfig
         run: |
-            CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
-            aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "${AWS_REGION}"
-            kubectl get nodes
+          CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
+          echo "Cluster name: $CLUSTER_NAME"
+            
+          # Remove existing kubeconfig completely
+          rm -f ~/.kube/config
+            
+           # Create fresh kubeconfig
+           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "${AWS_REGION}"
+            
+           # Wait a moment for token to be available
+           sleep 5
+            
+           # Verify connection works
+           kubectl auth can-i get nodes
+           kubectl get nodes   
+          
+      # - name: Configure Kubeconfig
+      #   run: |
+      #       CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
+      #       aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "${AWS_REGION}"
+      #       kubectl get nodes
 
 
       - name: Apply Kubernetes Addons
