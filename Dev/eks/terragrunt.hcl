@@ -30,6 +30,7 @@ inputs = {
         desired_size = 1
         max_size     = 2
         min_size     = 0
+        disk_size     = 20
       }
     }
 
