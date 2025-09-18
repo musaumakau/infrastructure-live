@@ -39,7 +39,7 @@ jobs:
           sudo mv terragrunt /usr/local/bin/
       
       - name: Format Check (Terragrunt)
-        run: terragrunt hcl format --terragrunt-check || true # not failing pipeline yet
+        run: terragrunt hclfmt --terragrunt-check || true # not failing pipeline yet
       
       - name: Initialize Terragrunt Modules
         run: |
@@ -55,30 +55,28 @@ jobs:
         run: |
           cd vpc
           terragrunt plan --non-interactive
-
+      
       - name: Plan EKS
         run: |
           cd eks
           terragrunt plan --non-interactive
-
+      
       - name: Plan Kubernetes Addons
         run: |
           cd kubernetes-addons
           terragrunt plan --non-interactive
         continue-on-error: true  
-
-
+      
       - name: Apply VPC
         run: |
           cd vpc
           terragrunt apply --non-interactive --auto-approve
-
+      
       - name: Apply EKS
         run: |
           cd eks
-          terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
-
-
+          terragrunt apply --non-interactive --auto-approve
+      
       - name: Configure Kubeconfig
         run: |
           CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
@@ -87,28 +85,17 @@ jobs:
           # Remove existing kubeconfig completely
           rm -f ~/.kube/config
             
-           # Create fresh kubeconfig
-           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "${AWS_REGION}"
+          # Create fresh kubeconfig
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "${AWS_REGION}"
             
-           # Wait a moment for token to be available
-           sleep 5
+          # Wait a moment for token to be available
+          sleep 5
             
-           # Verify connection works
-           kubectl auth can-i get nodes
-           kubectl get nodes   
-          
-      # - name: Configure Kubeconfig
-      #   run: |
-      #       CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
-      #       aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "${AWS_REGION}"
-      #       kubectl get nodes
-
-
+          # Verify connection works
+          kubectl auth can-i get nodes
+          kubectl get nodes   
+      
       - name: Apply Kubernetes Addons
         run: |
           cd kubernetes-addons
           terragrunt apply --non-interactive --auto-approve
-          
-            
-        # - name: Terragrunt Apply
-        #   run: terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
