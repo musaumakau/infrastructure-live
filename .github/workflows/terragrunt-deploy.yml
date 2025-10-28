@@ -49,7 +49,11 @@ jobs:
           (cd kubernetes-addons && terragrunt init --upgrade)
       
       - name: Validate Terragrunt Modules
-        run: terragrunt validate --all
+        run: |
+          # Validate each module in dependency order
+          (cd vpc && terragrunt validate)
+          (cd eks && terragrunt validate)
+          (cd kubernetes-addons && terragrunt validate)
       
       - name: Plan VPC
         run: |
