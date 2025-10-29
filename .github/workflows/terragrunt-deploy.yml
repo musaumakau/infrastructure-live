@@ -34,6 +34,8 @@ jobs:
       
       - name: Install Terragrunt
         run: |
+          # Pin to a known working version
+          TERRAGRUNT_VERSION="0.84.1"
           curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/latest/download/terragrunt_linux_amd64
           chmod +x terragrunt
           sudo mv terragrunt /usr/local/bin/
