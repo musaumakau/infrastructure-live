@@ -19,7 +19,8 @@ dependency "eks" {
     openid_provider_arn     = "arn:aws:iam::123456789012:oidc-provider"
     cluster_oidc_issuer_url = "https://oidc.eks.eu-west-1.amazonaws.com/id/MOCK"
   }
-  mock_outputs_allowed_terraform_commands = ["validate", "plan", "apply"]
+  mock_outputs_allowed_terraform_commands = ["init", "validate", "plan"]
+  mock_outputs_merge_strategy_with_state  = "shallow"
 }
 
 inputs = {
