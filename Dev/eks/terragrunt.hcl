@@ -14,12 +14,12 @@ include "env" {
 
 dependency "vpc" {
   config_path = "../vpc"
-  
+
   mock_outputs = {
     vpc_id             = "vpc-00000000000000000"
     private_subnet_ids = ["subnet-1234", "subnet-5678"]
   }
-  
+
   mock_outputs_allowed_terraform_commands = ["init", "validate", "plan"]
   mock_outputs_merge_strategy_with_state  = "shallow"
 }
@@ -30,7 +30,7 @@ inputs = {
   eks_name    = "demo"
   vpc_id      = dependency.vpc.outputs.vpc_id
   subnet_ids  = dependency.vpc.outputs.private_subnet_ids
-  
+
   node_groups = {
     general = {
       capacity_type  = "ON_DEMAND"

@@ -3,7 +3,7 @@ terraform {
 }
 
 include "root" {
-  path = find_in_parent_folders("root.hcl")
+  path   = find_in_parent_folders("root.hcl")
   expose = true
 }
 
@@ -14,9 +14,9 @@ include "env" {
 }
 
 locals {
-  env = include.env.locals.env
-  region = "eu-west-1"
-  get_aws_account_id()
+  env            = include.env.locals.env
+  region         = "eu-west-1"
+  aws_account_id = get_aws_account_id()
 }
 
 dependency "eks" {
@@ -35,7 +35,7 @@ inputs = {
   env                     = include.env.locals.env
   eks_name                = dependency.eks.outputs.eks_name
   openid_provider_arn     = dependency.eks.outputs.openid_provider_arn
-  aws_region              = local.aws_region 
+  aws_region              = local.aws_region
   aws_account_id          = local.aws_account_id
   skip_helm_deployments   = false
 
