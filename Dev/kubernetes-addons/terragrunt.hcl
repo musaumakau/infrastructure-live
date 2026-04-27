@@ -15,7 +15,7 @@ include "env" {
 
 locals {
   env            = include.env.locals.env
-  region         = "eu-west-1"
+  aws_region     = "eu-west-1"
   aws_account_id = get_aws_account_id()
 }
 
@@ -32,7 +32,7 @@ dependency "eks" {
 
 inputs = {
   cluster_oidc_issuer_url = dependency.eks.outputs.cluster_oidc_issuer_url
-  env                     = include.env.locals.env
+  env                     = local.env
   eks_name                = dependency.eks.outputs.eks_name
   openid_provider_arn     = dependency.eks.outputs.openid_provider_arn
   aws_region              = local.aws_region
