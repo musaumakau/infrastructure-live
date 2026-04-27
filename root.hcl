@@ -1,6 +1,6 @@
 locals {
   aws_region     = "eu-west-1"
-  aws_account_id = get_aws_account_id() # ← Terragrunt built-in
+  aws_account_id = get_aws_account_id() 
 }
 
 
