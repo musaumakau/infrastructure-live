@@ -1,8 +1,3 @@
-locals {
-  aws_region     = "eu-west-1"
-  aws_account_id = get_aws_account_id() 
-}
-
 
 remote_state {
   backend = "s3"
@@ -14,7 +9,7 @@ remote_state {
   config = {
     bucket         = "tf-backennd-bucket"
     key            = "${path_relative_to_include()}/terraform.tfstate"
-    region         = local.aws_region
+    region         = "eu-west-1"
     encrypt        = true
     dynamodb_table = "terraform-lock-table"
   }
@@ -26,7 +21,7 @@ generate "provider" {
 
   contents = <<EOF
 provider "aws" {
-        region = "${local.aws_region}" 
+        region = "eu-west-1"
 
     }
     EOF
