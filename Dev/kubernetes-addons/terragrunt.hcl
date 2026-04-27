@@ -76,11 +76,9 @@ generate "helm_provider" {
 data "aws_eks_cluster" "eks" {
   name = var.eks_name
 }
-
 data "aws_eks_cluster_auth" "eks" {
   name = var.eks_name
 }
-
 provider "helm" {
   kubernetes {
     host                   = data.aws_eks_cluster.eks.endpoint
