@@ -42,7 +42,6 @@ inputs = {
   enable_cluster_autoscaler       = true
   cluster_autoscaler_helm_version = "9.48.0"
 
-#aws load balancer controller
   enable_aws_lbc       = true
   aws_lbc_helm_version = "1.7.1"
 
