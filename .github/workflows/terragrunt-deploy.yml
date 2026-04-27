@@ -10,6 +10,7 @@ jobs:
   deploy:
     name: Deploy Terragrunt Infra
     runs-on: ubuntu-latest
+    environment: Dev
     env:
       REPO_DISPATCH_PAT: ${{ secrets.REPO_DISPATCH_PAT }}
     defaults:
@@ -36,7 +37,7 @@ jobs:
         run: |
           # Pin to a known working version
           TERRAGRUNT_VERSION="0.84.1"
-          curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/latest/download/terragrunt_linux_amd64
+          curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
           chmod +x terragrunt
           sudo mv terragrunt /usr/local/bin/
       
@@ -105,3 +106,10 @@ jobs:
         run: |
           cd kubernetes-addons
           terragrunt apply --non-interactive --auto-approve
+
+        env:
+         GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+          
+            
+        # - name: Terragrunt Apply
+        #   run: terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
