@@ -45,6 +45,7 @@ inputs = {
   env                     = local.env
   eks_name                = dependency.eks.outputs.eks_name
   openid_provider_arn     = dependency.eks.outputs.openid_provider_arn
+  vpc_id                  = dependency.vpc.outputs.id
   aws_region              = local.aws_region
   aws_account_id          = local.aws_account_id
   skip_helm_deployments   = false
