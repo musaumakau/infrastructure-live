@@ -28,7 +28,6 @@ dependency "vpc" {
   mock_outputs_merge_strategy_with_state  = "shallow"
 }
 
-
 dependency "eks" {
   config_path = "../eks"
   mock_outputs = {
