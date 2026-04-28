@@ -19,6 +19,16 @@ locals {
   aws_account_id = get_aws_account_id()
 }
 
+dependency "vpc" {
+  config_path = "../vpc"
+  mock_outputs = {
+    vpc_id = "vpc-00000000000000000"
+  }
+  mock_outputs_allowed_terraform_commands = ["init", "validate", "plan"]
+  mock_outputs_merge_strategy_with_state  = "shallow"
+}
+
+
 dependency "eks" {
   config_path = "../eks"
   mock_outputs = {
@@ -46,7 +56,7 @@ inputs = {
   aws_lbc_helm_version = "1.7.1"
 
   enable_ebs_csi_driver = true
-  ebs_csi_addon_version = "v1.28.0-eksbuild.1"
+  ebs_csi_addon_version = "v1.59.0-eksbuild.1"
 
   enable_metrics_server       = true
   metrics_server_helm_version = "3.12.1"
