@@ -77,6 +77,9 @@ inputs = {
 
   enable_loki       = true
   loki_helm_version = "2.10.2"
+
+  enable_keda       = true
+  keda_helm_version = "2.15.1"
 }
 
 generate "helm_provider" {
