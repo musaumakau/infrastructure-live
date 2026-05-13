@@ -1,14 +1,136 @@
 name: Terragrunt Deploy
+
 on:
   repository_dispatch:
-    types: [trigger-deploy] # Triggered from infra-modules repo
-  workflow_dispatch: # Manual trigger via GitHub UI
+    types: [trigger-deploy]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit SHA from infrastructure-modules'
+        required: false
+
 permissions:
   id-token: write
   contents: read
+
 jobs:
+  gate:
+    name: Plan Comparison Gate
+    runs-on: ubuntu-latest
+    outputs:
+      needs_approval: ${{ steps.compare.outputs.needs_approval }}
+      reason:         ${{ steps.compare.outputs.reason }}
+    strategy:
+      matrix:
+        module:
+          - vpc
+          - eks
+          - kubernetes-addons
+      fail-fast: false
+    env:
+      REPO_DISPATCH_PAT: ${{ secrets.REPO_DISPATCH_PAT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
+          aws-region: eu-west-1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Install Terragrunt
+        run: |
+          TERRAGRUNT_VERSION="0.84.1"
+          curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
+          chmod +x terragrunt
+          sudo mv terragrunt /usr/local/bin/
+
+      - name: Fetch manifest from S3
+        id: fetch
+        run: |
+          SHA="${{ github.event.client_payload.sha || inputs.sha }}"
+
+          if [ -z "$SHA" ]; then
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No SHA provided — skipping manifest fetch"
+            exit 0
+          fi
+
+          KEY="deploy-pointer/${SHA}/${{ matrix.module }}/manifest.json"
+
+          aws s3 cp s3://${{ vars.PLAN_MANIFEST_BUCKET }}/${KEY} pr-manifest.json \
+            && echo "found=true" >> $GITHUB_OUTPUT \
+            || echo "found=false" >> $GITHUB_OUTPUT
+
+      - name: Re-plan
+        id: replan
+        env:
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          cd Dev/${{ matrix.module }}
+          terragrunt init --upgrade
+          terragrunt plan --non-interactive -out=tfplan.binary
+          terragrunt show -json tfplan.binary > tfplan-deploy.json
+          cp tfplan-deploy.json $GITHUB_WORKSPACE/tfplan-deploy.json
+
+      - name: Compare plans
+        id: compare
+        run: |
+          if [ "${{ steps.fetch.outputs.found }}" != "true" ]; then
+            echo "needs_approval=true" >> $GITHUB_OUTPUT
+            echo "reason=No manifest found in S3 for this SHA — manual review required" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          python3 << 'EOF'
+          import json, os
+
+          with open('pr-manifest.json') as f:
+              pr = json.load(f)
+
+          with open('tfplan-deploy.json') as f:
+              deploy_plan = json.load(f)
+
+          pr_resources = {r['address']: r['actions'] for r in pr['resources']}
+
+          deploy_resources = {
+              r['address']: r['change']['actions']
+              for r in deploy_plan.get('resource_changes', [])
+              if r['change']['actions'] != ['no-op']
+          }
+
+          surprises = {
+              addr: actions
+              for addr, actions in deploy_resources.items()
+              if addr not in pr_resources
+          }
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as gh:
+              if surprises:
+                  gh.write("needs_approval=true\n")
+                  gh.write(f"reason=Deploy plan contains {len(surprises)} resources not reviewed in PR: {list(surprises.keys())}\n")
+                  print(f"WARNING — unexpected resources found: {surprises}")
+              else:
+                  gh.write("needs_approval=false\n")
+                  gh.write("reason=All resources were reviewed in PR\n")
+                  print("AUTO-APPROVED — deploy matches PR plan")
+          EOF
+
+      - name: Log gate result
+        run: |
+          echo "Needs approval: ${{ steps.compare.outputs.needs_approval }}"
+          echo "Reason: ${{ steps.compare.outputs.reason }}"
+
   deploy:
     name: Deploy Terragrunt Infra
+    needs: gate
+    if: always() && !failure() && !cancelled()
     runs-on: ubuntu-latest
     environment: Dev
     env:
@@ -16,100 +138,71 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: Dev # Adjust this if you're deploying Prod or Staging
-    
+        working-directory: Dev
     steps:
       - name: Checkout Live Infra
         uses: actions/checkout@v4
-      
+
       - name: Configure AWS Credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
           aws-region: eu-west-1
-      
+
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.7.5
-      
+
       - name: Install Terragrunt
         run: |
-          # Pin to a known working version
           TERRAGRUNT_VERSION="0.84.1"
           curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
           chmod +x terragrunt
           sudo mv terragrunt /usr/local/bin/
-      
+
       - name: Format Check (Terragrunt)
-        run: terragrunt hclfmt --terragrunt-check || true # not failing pipeline yet
-      
+        run: terragrunt hclfmt --terragrunt-check || true
+
       - name: Initialize Terragrunt Modules
         run: |
-          # Initialize each module in dependency order
           (cd vpc && terragrunt init --upgrade)
           (cd eks && terragrunt init --upgrade)
           (cd kubernetes-addons && terragrunt init --upgrade)
-      
+
       - name: Validate Terragrunt Modules
         run: |
-          # Validate each module in dependency order
           (cd vpc && terragrunt validate)
           (cd eks && terragrunt validate)
           (cd kubernetes-addons && terragrunt validate)
-      
+
       - name: Plan VPC
-        run: |
-          cd vpc
-          terragrunt plan --non-interactive
-      
+        run: cd vpc && terragrunt plan --non-interactive
+
       - name: Plan EKS
-        run: |
-          cd eks
-          terragrunt plan --non-interactive
-      
+        run: cd eks && terragrunt plan --non-interactive
+
       - name: Plan Kubernetes Addons
-        run: |
-          cd kubernetes-addons
-          terragrunt plan --non-interactive
-        continue-on-error: true  
-      
+        run: cd kubernetes-addons && terragrunt plan --non-interactive
+        continue-on-error: true
+
       - name: Apply VPC
-        run: |
-          cd vpc
-          terragrunt apply --non-interactive --auto-approve
-      
+        run: cd vpc && terragrunt apply --non-interactive --auto-approve
+
       - name: Apply EKS
-        run: |
-          cd eks
-          terragrunt apply --non-interactive --auto-approve
-      
+        run: cd eks && terragrunt apply --non-interactive --auto-approve
+
       - name: Configure Kubeconfig
         run: |
           CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
           echo "Cluster name: $CLUSTER_NAME"
-            
-          # Remove existing kubeconfig completely
           rm -f ~/.kube/config
-            
-          # Create fresh kubeconfig
-          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "${AWS_REGION}"
-            
-          # Wait a moment for token to be available
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region eu-west-1
           sleep 5
-            
-          # Verify connection works
           kubectl auth can-i get nodes
-          kubectl get nodes   
-      
-      - name: Apply Kubernetes Addons
-        run: |
-          cd kubernetes-addons
-          terragrunt apply --non-interactive --auto-approve
+          kubectl get nodes
 
+      - name: Apply Kubernetes Addons
+        run: cd kubernetes-addons && terragrunt apply --non-interactive --auto-approve
         env:
-         GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
-          
-            
-        # - name: Terragrunt Apply
-        #   run: terragrunt run-all apply --non-interactive --terragrunt-include-external-dependencies --auto-approve
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
