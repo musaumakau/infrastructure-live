@@ -31,11 +31,17 @@ inputs = {
   vpc_id      = dependency.vpc.outputs.vpc_id
   subnet_ids  = dependency.vpc.outputs.private_subnet_ids
 
+  admin_principal_arns    = ["arn:aws:iam::649203810550:user/Kay"]
+  github_actions_role_arn = "arn:aws:iam::649203810550:role/EksOIDCRole"
+
   node_groups = {
     general = {
       capacity_type  = "ON_DEMAND"
       instance_types = ["t3a.xlarge"]
       disk_size      = 20
+      ami_type       = "AL2_x86_64"
+      labels         = {}
+      taints         = {}
       scaling_config = {
         desired_size = 1
         max_size     = 2
