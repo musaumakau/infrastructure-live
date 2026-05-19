@@ -73,10 +73,20 @@ jobs:
         env:
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         run: |
+          set -euo pipefail
           cd Dev/${{ matrix.module }}
           terragrunt init --upgrade
           terragrunt plan --non-interactive -out=tfplan.binary
-          terragrunt show -json tfplan.binary > tfplan-deploy.json
+
+          # terragrunt show is not a valid command — locate the cache dir where
+          # Terraform wrote the binary and invoke terraform show directly
+          CACHE_DIR=$(find .terragrunt-cache -name "tfplan.binary" -printf '%h\n' | head -1)
+          if [ -z "$CACHE_DIR" ]; then
+            echo "ERROR: could not find tfplan.binary under .terragrunt-cache"
+            exit 1
+          fi
+
+          terraform -chdir="$CACHE_DIR" show -json tfplan.binary > tfplan-deploy.json
           cp tfplan-deploy.json $GITHUB_WORKSPACE/tfplan-deploy.json
 
       - name: Compare plans
@@ -194,7 +204,8 @@ jobs:
 
       - name: Configure Kubeconfig
         run: |
-          CLUSTER_NAME=$(terragrunt output -raw eks_name --working-dir=eks)
+          # --working-dir is not a valid terragrunt output flag; cd instead
+          CLUSTER_NAME=$(cd eks && terragrunt output -raw eks_name)
           echo "Cluster name: $CLUSTER_NAME"
           rm -f ~/.kube/config
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region eu-west-1
