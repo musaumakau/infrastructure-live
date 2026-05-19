@@ -58,9 +58,9 @@ inputs = {
   enable_ebs_csi_driver = true
   ebs_csi_addon_version = "v1.59.0-eksbuild.1"
 
-  enable_metrics_server        = true
-  metrics_server_helm_version  = "3.12.1"
-  metrics_server_insecure_tls  = true
+  enable_metrics_server       = true
+  metrics_server_helm_version = "3.12.1"
+  metrics_server_insecure_tls = true
 
   enable_external_secrets       = true
   external_secrets_helm_version = "0.9.13"
