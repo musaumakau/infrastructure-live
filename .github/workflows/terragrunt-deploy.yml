@@ -8,15 +8,15 @@
 #     └─ auto-dispatch → Dev (always, no approval)
 #
 #   Dev deploy succeeds
-#     └─ promote job fires workflow_dispatch → Staging deploys automatically
+#     └─ promote job fires repository_dispatch (trigger-staging) → Staging deploys
 #
 #   Staging deploy succeeds
-#     └─ promote job fires workflow_dispatch → Prod deploys automatically
+#     └─ promote job fires repository_dispatch (trigger-prod) → Prod deploys
 #
 # TRIGGERS:
 #   repository_dispatch  — fired by infrastructure-modules on merge to main
 #                          always targets Dev
-#   workflow_dispatch    — fired by promote job for Staging/Prod progression
+#   workflow_dispatch    — manual re-runs only
 #                          also used for manual re-runs of a failed deploy
 #
 # NOTE: No push trigger — adding environment configs to main never triggers
@@ -33,13 +33,13 @@
 name: Terragrunt Deploy
 
 on:
-  # Triggered automatically by infrastructure-modules pipeline on merge to main
-  # client_payload.environment is always 'Dev' from modules dispatch
+  # trigger-deploy   — fired by infrastructure-modules on merge to main → Dev
+  # trigger-staging  — fired by promote job after successful Dev deploy
+  # trigger-prod     — fired by promote job after successful Staging deploy
   repository_dispatch:
-    types: [trigger-deploy]
+    types: [trigger-deploy, trigger-staging, trigger-prod]
 
-  # Triggered by the promote job in this pipeline to deploy Staging or Prod
-  # Also used for manual re-runs of a failed deploy
+  # Manual re-run of a failed deploy
   workflow_dispatch:
     inputs:
       environment:
@@ -92,11 +92,23 @@ jobs:
             SHA="${{ inputs.sha || github.sha }}"
             echo "Manual dispatch — environment: $ENV, sha: $SHA"
 
-          # repository_dispatch from infrastructure-modules — always Dev
+          # repository_dispatch — event action determines target environment
           elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            ENV="Dev"
+            ACTION="${{ github.event.action }}"
             SHA="${{ github.event.client_payload.sha }}"
-            echo "Repository dispatch — targeting Dev, sha: $SHA"
+
+            if [ "$ACTION" = "trigger-deploy" ]; then
+              ENV="Dev"
+            elif [ "$ACTION" = "trigger-staging" ]; then
+              ENV="Staging"
+            elif [ "$ACTION" = "trigger-prod" ]; then
+              ENV="Prod"
+            else
+              echo "ERROR: unknown dispatch action: $ACTION"
+              exit 1
+            fi
+
+            echo "Repository dispatch — action: $ACTION, environment: $ENV, sha: $SHA"
 
           # fallback — should not be reached with current triggers
           else
@@ -351,11 +363,11 @@ jobs:
 # =============================================================================
 # JOB 4: Promote to next environment
 # After a successful deploy, triggers workflow_dispatch for the next env.
-#   Dev     → triggers Staging deploy via workflow_dispatch
-#   Staging → triggers Prod deploy via workflow_dispatch
+#   Dev     → fires repository_dispatch trigger-staging
+#   Staging → fires repository_dispatch trigger-prod
 #   Prod    → no-op (end of pipeline)
 #
-# Using workflow_dispatch instead of a push-triggered PR means adding new
+# Using repository_dispatch instead of a push-triggered PR means adding new
 # environment configs to main never accidentally triggers a deploy.
 # =============================================================================
   promote:
@@ -389,21 +401,32 @@ jobs:
           set -euo pipefail
           NEXT="${{ steps.next.outputs.env }}"
           SHA="${{ needs.resolve-env.outputs.sha }}"
+          NEXT_EVENT="trigger-${NEXT,,}"  # trigger-staging or trigger-prod
 
-          echo "Promoting ${{ env.TARGET_ENV }} → $NEXT (sha: $SHA)"
+          echo "Promoting ${{ env.TARGET_ENV }} → $NEXT (event: $NEXT_EVENT, sha: $SHA)"
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "event_type": "${NEXT_EVENT}",
+            "client_payload": {
+              "sha": "${SHA}"
+            }
+          }
+          EOF
+          )
 
           HTTP_STATUS=$(curl -s -o /tmp/dispatch-response.json -w "%{http_code}" \
             -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/musaumakau/infrastructure-live/actions/workflows/terragrunt-deploy.yml/dispatches" \
-            -d "{\"ref\":\"main\",\"inputs\":{\"environment\":\"${NEXT}\",\"sha\":\"${SHA}\"}}")
+            https://api.github.com/repos/musaumakau/infrastructure-live/dispatches \
+            -d "$PAYLOAD")
 
           cat /tmp/dispatch-response.json || true
 
           if [ "$HTTP_STATUS" != "204" ]; then
-            echo "ERROR: workflow_dispatch failed with HTTP $HTTP_STATUS"
+            echo "ERROR: repository_dispatch failed with HTTP $HTTP_STATUS"
             exit 1
           fi
 
-          echo "::notice::Triggered ${NEXT} deploy via workflow_dispatch (SHA: $SHA)"
+          echo "::notice::Triggered ${NEXT} deploy via repository_dispatch (SHA: $SHA)"
