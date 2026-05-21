@@ -8,26 +8,19 @@
 #     └─ auto-dispatch → Dev (always, no approval)
 #
 #   Dev deploy succeeds
-#     └─ pipeline auto-opens PR: bump module version in Staging/
-#        engineer reviews + merges → Staging deploys
+#     └─ promote job fires workflow_dispatch → Staging deploys automatically
 #
 #   Staging deploy succeeds
-#     └─ pipeline auto-opens PR: bump module version in Prod/
-#        engineer reviews + merges → Prod deploys
-#
-# ENVIRONMENT DETECTION:
-#   The pipeline reads which environment directory changed on this commit
-#   (Dev/, Staging/, or Prod/) and scopes ALL steps to that environment only.
-#   A push that touches Dev/ never applies Staging/ or Prod/.
+#     └─ promote job fires workflow_dispatch → Prod deploys automatically
 #
 # TRIGGERS:
-#   repository_dispatch  — auto-triggered by infrastructure-modules on merge
-#                          client_payload.sha = triggering commit
+#   repository_dispatch  — fired by infrastructure-modules on merge to main
 #                          always targets Dev
-#   push to main         — triggers when a promotion PR is merged
-#                          environment detected from changed directory
-#   workflow_dispatch    — manual trigger with environment + sha inputs
-#                          useful for re-running a failed deploy
+#   workflow_dispatch    — fired by promote job for Staging/Prod progression
+#                          also used for manual re-runs of a failed deploy
+#
+# NOTE: No push trigger — adding environment configs to main never triggers
+#       a deploy. Only explicit dispatches do.
 #
 # REQUIRED SECRETS:
 #   REPO_DISPATCH_PAT      — PAT for cross-repo PR creation and dispatch
@@ -40,16 +33,13 @@
 name: Terragrunt Deploy
 
 on:
+  # Triggered automatically by infrastructure-modules pipeline on merge to main
+  # client_payload.environment is always 'Dev' from modules dispatch
   repository_dispatch:
     types: [trigger-deploy]
 
-  push:
-    branches: [main]
-    paths:
-      - 'Dev/**'
-      - 'Staging/**'
-      - 'Prod/**'
-
+  # Triggered by the promote job in this pipeline to deploy Staging or Prod
+  # Also used for manual re-runs of a failed deploy
   workflow_dispatch:
     inputs:
       environment:
@@ -108,30 +98,10 @@ jobs:
             SHA="${{ github.event.client_payload.sha }}"
             echo "Repository dispatch — targeting Dev, sha: $SHA"
 
-          # push to main — detect from changed directories (promotion PR merge)
+          # fallback — should not be reached with current triggers
           else
-            CHANGED=$(git diff --name-only HEAD~1..HEAD \
-              | grep -oP '^(Dev|Staging|Prod)(?=/)' \
-              | sort -u)
-
-            COUNT=$(echo "$CHANGED" | grep -c . || true)
-
-            if [ "$COUNT" -eq 0 ]; then
-              echo "No environment directory changed — nothing to deploy"
-              echo "environment=none" >> $GITHUB_OUTPUT
-              echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-
-            if [ "$COUNT" -gt 1 ]; then
-              echo "ERROR: changes span multiple environments ($CHANGED)"
-              echo "Promotion PRs must touch exactly one environment directory."
-              exit 1
-            fi
-
-            ENV="$CHANGED"
-            SHA="${{ github.sha }}"
-            echo "Detected environment from changed paths: $ENV"
+            echo "ERROR: unexpected event type ${{ github.event_name }}"
+            exit 1
           fi
 
           echo "environment=$ENV" >> $GITHUB_OUTPUT
@@ -378,19 +348,18 @@ jobs:
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
 
 # =============================================================================
-# JOB 4: Open promotion PR
-# After a successful deploy, auto-opens a PR to promote the same module
-# versions to the next environment:
-#   Dev     → opens PR bumping versions in Staging/
-#   Staging → opens PR bumping versions in Prod/
+# =============================================================================
+# JOB 4: Promote to next environment
+# After a successful deploy, triggers workflow_dispatch for the next env.
+#   Dev     → triggers Staging deploy via workflow_dispatch
+#   Staging → triggers Prod deploy via workflow_dispatch
 #   Prod    → no-op (end of pipeline)
 #
-# The PR diff shows exactly which module version tags are changing.
-# An engineer reviews and merges — the merge triggers this pipeline again
-# targeting the next environment.
+# Using workflow_dispatch instead of a push-triggered PR means adding new
+# environment configs to main never accidentally triggers a deploy.
 # =============================================================================
   promote:
-    name: "Open Promotion PR → ${{ needs.resolve-env.outputs.environment == 'Dev' && 'Staging' || 'Prod' }}"
+    name: Promote to next environment
     runs-on: ubuntu-latest
     needs: [resolve-env, deploy]
     if: |
@@ -399,20 +368,13 @@ jobs:
        needs.resolve-env.outputs.environment == 'Staging')
 
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
 
     env:
       TARGET_ENV: ${{ needs.resolve-env.outputs.environment }}
       GH_TOKEN:   ${{ secrets.REPO_DISPATCH_PAT }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.REPO_DISPATCH_PAT }}
-
       - name: Resolve next environment
         id: next
         run: |
@@ -422,90 +384,26 @@ jobs:
             echo "env=Prod" >> $GITHUB_OUTPUT
           fi
 
-      - name: Read current module versions from source env
-        id: versions
-        run: |
-          set -euo pipefail
-          SRC="${{ env.TARGET_ENV }}"
-
-          # Extract ref= values from each terragrunt.hcl
-          VPC_VER=$(grep -oP '(?<=ref=)[^\s"]+' ${SRC}/vpc/terragrunt.hcl | head -1)
-          EKS_VER=$(grep -oP '(?<=ref=)[^\s"]+' ${SRC}/eks/terragrunt.hcl | head -1)
-          K8S_VER=$(grep -oP '(?<=ref=)[^\s"]+' ${SRC}/kubernetes-addons/terragrunt.hcl | head -1)
-
-          echo "vpc=$VPC_VER"                 >> $GITHUB_OUTPUT
-          echo "eks=$EKS_VER"                 >> $GITHUB_OUTPUT
-          echo "kubernetes_addons=$K8S_VER"   >> $GITHUB_OUTPUT
-          echo "Versions to promote: vpc=$VPC_VER eks=$EKS_VER k8s-addons=$K8S_VER"
-
-      - name: Configure git
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin \
-            https://x-access-token:${{ secrets.REPO_DISPATCH_PAT }}@github.com/musaumakau/infrastructure-live.git
-
-      - name: Create promotion branch and bump versions
-        id: branch
+      - name: Trigger next environment deploy
         run: |
           set -euo pipefail
           NEXT="${{ steps.next.outputs.env }}"
-          SHORT_SHA="${{ github.sha }}"
-          SHORT_SHA="${SHORT_SHA:0:7}"
-          BRANCH="promote/${NEXT,,}-${SHORT_SHA}"
+          SHA="${{ needs.resolve-env.outputs.sha }}"
 
-          git checkout -b "$BRANCH"
+          echo "Promoting ${{ env.TARGET_ENV }} → $NEXT (sha: $SHA)"
 
-          # Bump vpc version
-          sed -i "s|ref=[^ \"]*vpc[^ \"]*|ref=${{ steps.versions.outputs.vpc }}|g" \
-            ${NEXT}/vpc/terragrunt.hcl
+          HTTP_STATUS=$(curl -s -o /tmp/dispatch-response.json -w "%{http_code}" \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/musaumakau/infrastructure-live/actions/workflows/terragrunt-deploy.yml/dispatches" \
+            -d "{\"ref\":\"main\",\"inputs\":{\"environment\":\"${NEXT}\",\"sha\":\"${SHA}\"}}")
 
-          # Bump eks version
-          sed -i "s|ref=[^ \"]*eks[^ \"]*|ref=${{ steps.versions.outputs.eks }}|g" \
-            ${NEXT}/eks/terragrunt.hcl
+          cat /tmp/dispatch-response.json || true
 
-          # Bump kubernetes-addons version
-          sed -i "s|ref=[^ \"]*kubernetes-addons[^ \"]*|ref=${{ steps.versions.outputs.kubernetes_addons }}|g" \
-            ${NEXT}/kubernetes-addons/terragrunt.hcl
+          if [ "$HTTP_STATUS" != "204" ]; then
+            echo "ERROR: workflow_dispatch failed with HTTP $HTTP_STATUS"
+            exit 1
+          fi
 
-          git add ${NEXT}/
-          git diff --cached --stat
-
-          git commit -m "promote(${{ env.TARGET_ENV }}→${NEXT}): bump module versions to ${{ github.sha }}"
-          git push origin "$BRANCH"
-
-          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-          echo "next=$NEXT"     >> $GITHUB_OUTPUT
-
-      - name: Open pull request
-        run: |
-          set -euo pipefail
-          NEXT="${{ steps.branch.outputs.next }}"
-          BRANCH="${{ steps.branch.outputs.branch }}"
-
-          gh pr create \
-            --base main \
-            --head "$BRANCH" \
-            --title "promote(${{ env.TARGET_ENV }}→${NEXT}): $(date -u +%Y-%m-%d) · ${{ github.sha }}" \
-            --body "## Promotion: ${{ env.TARGET_ENV }} → ${NEXT}
-
-          Automated promotion PR opened after successful **${{ env.TARGET_ENV }}** deploy.
-
-          ### Module versions being promoted
-          | Module | Version |
-          |---|---|
-          | vpc | \`${{ steps.versions.outputs.vpc }}\` |
-          | eks | \`${{ steps.versions.outputs.eks }}\` |
-          | kubernetes-addons | \`${{ steps.versions.outputs.kubernetes_addons }}\` |
-
-          ### What to check before merging
-          - [ ] ${{ env.TARGET_ENV }} deploy completed without errors
-          - [ ] No unexpected resource changes in gate job logs
-          - [ ] Blast radius score is acceptable for ${NEXT}
-
-          ### How to promote
-          Review and merge this PR. The deploy pipeline will automatically
-          trigger for **${NEXT}** when this PR merges to main.
-
-          ---
-          *Triggered by commit \`${{ github.sha }}\` · Run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
+          echo "::notice::Triggered ${NEXT} deploy via workflow_dispatch (SHA: $SHA)"
