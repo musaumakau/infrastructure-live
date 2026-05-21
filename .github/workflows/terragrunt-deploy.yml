@@ -1,34 +1,171 @@
+# =============================================================================
+# Terragrunt Deploy — infrastructure-live
+# =============================================================================
+#
+# ENVIRONMENT PROMOTION MODEL (Pattern 2 — directory per environment):
+#
+#   infrastructure-modules merge to main
+#     └─ auto-dispatch → Dev (always, no approval)
+#
+#   Dev deploy succeeds
+#     └─ pipeline auto-opens PR: bump module version in Staging/
+#        engineer reviews + merges → Staging deploys
+#
+#   Staging deploy succeeds
+#     └─ pipeline auto-opens PR: bump module version in Prod/
+#        engineer reviews + merges → Prod deploys
+#
+# ENVIRONMENT DETECTION:
+#   The pipeline reads which environment directory changed on this commit
+#   (Dev/, Staging/, or Prod/) and scopes ALL steps to that environment only.
+#   A push that touches Dev/ never applies Staging/ or Prod/.
+#
+# TRIGGERS:
+#   repository_dispatch  — auto-triggered by infrastructure-modules on merge
+#                          client_payload.sha = triggering commit
+#                          always targets Dev
+#   push to main         — triggers when a promotion PR is merged
+#                          environment detected from changed directory
+#   workflow_dispatch    — manual trigger with environment + sha inputs
+#                          useful for re-running a failed deploy
+#
+# REQUIRED SECRETS:
+#   REPO_DISPATCH_PAT      — PAT for cross-repo PR creation and dispatch
+#   GRAFANA_ADMIN_PASSWORD — passed through to kubernetes-addons
+#
+# REQUIRED VARIABLES:
+#   PLAN_MANIFEST_BUCKET   — S3 bucket for plan manifests
+# =============================================================================
+
 name: Terragrunt Deploy
 
 on:
   repository_dispatch:
     types: [trigger-deploy]
+
+  push:
+    branches: [main]
+    paths:
+      - 'Dev/**'
+      - 'Staging/**'
+      - 'Prod/**'
+
   workflow_dispatch:
     inputs:
+      environment:
+        description: 'Target environment (Dev / Staging / Prod)'
+        required: true
+        type: choice
+        options: [Dev, Staging, Prod]
       sha:
-        description: 'Commit SHA from infrastructure-modules'
+        description: 'Commit SHA (leave blank to use HEAD)'
         required: false
 
-permissions:
-  id-token: write
-  contents: read
+# Never cancel an in-progress deploy — a cancelled apply leaves state partial
+concurrency:
+  group: "terragrunt-deploy-${{ github.ref }}"
+  cancel-in-progress: false
 
+permissions: {}
+
+# =============================================================================
+# JOB 1: Resolve target environment
+# Determines which environment this run targets so every downstream job
+# can scope itself correctly without duplicating the detection logic.
+# =============================================================================
 jobs:
-  gate:
-    name: Plan Comparison Gate
+  resolve-env:
+    name: Resolve Target Environment
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    outputs:
+      environment: ${{ steps.detect.outputs.environment }}
+      sha:         ${{ steps.detect.outputs.sha }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect environment
+        id: detect
+        run: |
+          set -euo pipefail
+
+          # workflow_dispatch — explicit input wins
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+            SHA="${{ inputs.sha || github.sha }}"
+            echo "Manual dispatch — environment: $ENV, sha: $SHA"
+
+          # repository_dispatch from infrastructure-modules — always Dev
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            ENV="Dev"
+            SHA="${{ github.event.client_payload.sha }}"
+            echo "Repository dispatch — targeting Dev, sha: $SHA"
+
+          # push to main — detect from changed directories (promotion PR merge)
+          else
+            CHANGED=$(git diff --name-only HEAD~1..HEAD \
+              | grep -oP '^(Dev|Staging|Prod)(?=/)' \
+              | sort -u)
+
+            COUNT=$(echo "$CHANGED" | grep -c . || true)
+
+            if [ "$COUNT" -eq 0 ]; then
+              echo "No environment directory changed — nothing to deploy"
+              echo "environment=none" >> $GITHUB_OUTPUT
+              echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            if [ "$COUNT" -gt 1 ]; then
+              echo "ERROR: changes span multiple environments ($CHANGED)"
+              echo "Promotion PRs must touch exactly one environment directory."
+              exit 1
+            fi
+
+            ENV="$CHANGED"
+            SHA="${{ github.sha }}"
+            echo "Detected environment from changed paths: $ENV"
+          fi
+
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "sha=$SHA"         >> $GITHUB_OUTPUT
+
+# =============================================================================
+# JOB 2: Plan Comparison Gate (matrix: vpc, eks)
+# Re-plans each module and compares against the S3 manifest saved at PR time.
+# Auto-approves if resource addresses match; flags surprises for review.
+# =============================================================================
+  gate:
+    name: "Plan Comparison Gate [${{ matrix.module }}]"
+    runs-on: ubuntu-latest
+    needs: resolve-env
+    if: needs.resolve-env.outputs.environment != 'none'
+    timeout-minutes: 20
+
+    permissions:
+      id-token: write
+      contents: read
+
     outputs:
       needs_approval: ${{ steps.compare.outputs.needs_approval }}
       reason:         ${{ steps.compare.outputs.reason }}
+
     strategy:
       matrix:
-        module:
-          - vpc
-          - eks
-          # kubernetes-addons
+        module: [vpc, eks]
+        # kubernetes-addons excluded — depends on live cluster
       fail-fast: false
+
     env:
-      REPO_DISPATCH_PAT: ${{ secrets.REPO_DISPATCH_PAT }}
+      TARGET_ENV: ${{ needs.resolve-env.outputs.environment }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,34 +173,37 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
-          aws-region: eu-west-1
+          role-to-assume:    arn:aws:iam::649203810550:role/EksOIDCRole
+          aws-region:        eu-west-1
+          role-session-name: "github-actions-gate-${{ github.run_id }}"
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.7.5
+          terraform_wrapper: false
 
       - name: Install Terragrunt
         run: |
+          set -euo pipefail
           TERRAGRUNT_VERSION="0.84.1"
-          curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
-          chmod +x terragrunt
-          sudo mv terragrunt /usr/local/bin/
+          curl -L -o terragrunt \
+            https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
+          chmod +x terragrunt && sudo mv terragrunt /usr/local/bin/
 
       - name: Fetch manifest from S3
         id: fetch
         run: |
-          SHA="${{ github.event.client_payload.sha || inputs.sha }}"
+          set -euo pipefail
+          SHA="${{ needs.resolve-env.outputs.sha }}"
 
           if [ -z "$SHA" ]; then
             echo "found=false" >> $GITHUB_OUTPUT
-            echo "No SHA provided — skipping manifest fetch"
+            echo "No SHA — skipping manifest fetch"
             exit 0
           fi
 
           KEY="deploy-pointer/${SHA}/${{ matrix.module }}/manifest.json"
-
           aws s3 cp s3://${{ vars.PLAN_MANIFEST_BUCKET }}/${KEY} pr-manifest.json \
             && echo "found=true" >> $GITHUB_OUTPUT \
             || echo "found=false" >> $GITHUB_OUTPUT
@@ -71,15 +211,14 @@ jobs:
       - name: Re-plan
         id: replan
         env:
+          REPO_DISPATCH_PAT:      ${{ secrets.REPO_DISPATCH_PAT }}
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
-          cd Dev/${{ matrix.module }}
+          cd ${{ env.TARGET_ENV }}/${{ matrix.module }}
           terragrunt init --upgrade
           terragrunt plan --non-interactive -out=tfplan.binary
 
-          # terragrunt show is not a valid command — locate the cache dir where
-          # Terraform wrote the binary and invoke terraform show directly
           CACHE_DIR=$(find .terragrunt-cache -name "tfplan.binary" -printf '%h\n' | head -1)
           if [ -z "$CACHE_DIR" ]; then
             echo "ERROR: could not find tfplan.binary under .terragrunt-cache"
@@ -125,88 +264,105 @@ jobs:
               if surprises:
                   gh.write("needs_approval=true\n")
                   gh.write(f"reason=Deploy plan contains {len(surprises)} resources not reviewed in PR: {list(surprises.keys())}\n")
-                  print(f"WARNING — unexpected resources found: {surprises}")
+                  print(f"WARNING — unexpected resources: {surprises}")
               else:
                   gh.write("needs_approval=false\n")
-                  gh.write("reason=All resources were reviewed in PR\n")
+                  gh.write("reason=All resources reviewed in PR\n")
                   print("AUTO-APPROVED — deploy matches PR plan")
           EOF
 
       - name: Log gate result
         run: |
+          echo "Environment:    ${{ env.TARGET_ENV }}"
+          echo "Module:         ${{ matrix.module }}"
           echo "Needs approval: ${{ steps.compare.outputs.needs_approval }}"
-          echo "Reason: ${{ steps.compare.outputs.reason }}"
+          echo "Reason:         ${{ steps.compare.outputs.reason }}"
 
+# =============================================================================
+# JOB 3: Deploy
+# Applies vpc → eks → kubernetes-addons in order for the detected environment.
+# =============================================================================
   deploy:
-    name: Deploy Terragrunt Infra
-    needs: gate
-    if: always() && !failure() && !cancelled()
+    name: "Deploy [${{ needs.resolve-env.outputs.environment }}]"
     runs-on: ubuntu-latest
-    environment: Dev
+    needs: [resolve-env, gate]
+    if: always() && !failure() && !cancelled() && needs.resolve-env.outputs.environment != 'none'
+    timeout-minutes: 60
+
+    permissions:
+      id-token: write
+      contents: read
+
     env:
+      TARGET_ENV:        ${{ needs.resolve-env.outputs.environment }}
       REPO_DISPATCH_PAT: ${{ secrets.REPO_DISPATCH_PAT }}
+
     defaults:
       run:
         shell: bash
-        working-directory: Dev
+
     steps:
-      - name: Checkout Live Infra
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials with OIDC
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
-          aws-region: eu-west-1
+          role-to-assume:    arn:aws:iam::649203810550:role/EksOIDCRole
+          aws-region:        eu-west-1
+          role-session-name: "github-actions-deploy-${{ github.run_id }}"
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.7.5
+          terraform_wrapper: false
 
       - name: Install Terragrunt
         run: |
+          set -euo pipefail
           TERRAGRUNT_VERSION="0.84.1"
-          curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
-          chmod +x terragrunt
-          sudo mv terragrunt /usr/local/bin/
+          curl -L -o terragrunt \
+            https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
+          chmod +x terragrunt && sudo mv terragrunt /usr/local/bin/
+          terragrunt --version
 
-      - name: Format Check (Terragrunt)
-        run: terragrunt hclfmt --terragrunt-check || true
+      - name: Format Check
+        run: terragrunt hcl format --check --diff ${{ env.TARGET_ENV }} || true
 
-      - name: Initialize Terragrunt Modules
+      - name: Init all modules
         run: |
-          (cd vpc && terragrunt init --upgrade)
-          (cd eks && terragrunt init --upgrade)
-          (cd kubernetes-addons && terragrunt init --upgrade)
+          set -euo pipefail
+          for MODULE in vpc eks kubernetes-addons; do
+            echo "── init ${{ env.TARGET_ENV }}/$MODULE ──"
+            (cd ${{ env.TARGET_ENV }}/$MODULE && terragrunt init --upgrade)
+          done
 
-      - name: Validate Terragrunt Modules
+      - name: Validate all modules
         run: |
-          (cd vpc && terragrunt validate)
-          (cd eks && terragrunt validate)
-          (cd kubernetes-addons && terragrunt validate)
-
-      - name: Plan VPC
-        run: cd vpc && terragrunt plan --non-interactive
-
-      - name: Plan EKS
-        run: cd eks && terragrunt plan --non-interactive
-
-      - name: Plan Kubernetes Addons
-        run: cd kubernetes-addons && terragrunt plan --non-interactive
-        continue-on-error: true
+          set -euo pipefail
+          for MODULE in vpc eks; do
+            echo "── validate ${{ env.TARGET_ENV }}/$MODULE ──"
+            (cd ${{ env.TARGET_ENV }}/$MODULE && terragrunt validate)
+          done
 
       - name: Apply VPC
-        run: cd vpc && terragrunt apply --non-interactive --auto-approve
+        run: |
+          set -euo pipefail
+          cd ${{ env.TARGET_ENV }}/vpc
+          terragrunt apply --non-interactive --auto-approve
 
       - name: Apply EKS
-        run: cd eks && terragrunt apply --non-interactive --auto-approve
+        run: |
+          set -euo pipefail
+          cd ${{ env.TARGET_ENV }}/eks
+          terragrunt apply --non-interactive --auto-approve
 
       - name: Configure Kubeconfig
         run: |
-          # --working-dir is not a valid terragrunt output flag; cd instead
-          CLUSTER_NAME=$(cd eks && terragrunt output -raw eks_name)
-          echo "Cluster name: $CLUSTER_NAME"
+          set -euo pipefail
+          CLUSTER_NAME=$(cd ${{ env.TARGET_ENV }}/eks && terragrunt output -raw eks_name)
+          echo "Cluster: $CLUSTER_NAME"
           rm -f ~/.kube/config
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region eu-west-1
           sleep 5
@@ -214,6 +370,142 @@ jobs:
           kubectl get nodes
 
       - name: Apply Kubernetes Addons
-        run: cd kubernetes-addons && terragrunt apply --non-interactive --auto-approve
+        run: |
+          set -euo pipefail
+          cd ${{ env.TARGET_ENV }}/kubernetes-addons
+          terragrunt apply --non-interactive --auto-approve
         env:
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+
+# =============================================================================
+# JOB 4: Open promotion PR
+# After a successful deploy, auto-opens a PR to promote the same module
+# versions to the next environment:
+#   Dev     → opens PR bumping versions in Staging/
+#   Staging → opens PR bumping versions in Prod/
+#   Prod    → no-op (end of pipeline)
+#
+# The PR diff shows exactly which module version tags are changing.
+# An engineer reviews and merges — the merge triggers this pipeline again
+# targeting the next environment.
+# =============================================================================
+  promote:
+    name: "Open Promotion PR → ${{ needs.resolve-env.outputs.environment == 'Dev' && 'Staging' || 'Prod' }}"
+    runs-on: ubuntu-latest
+    needs: [resolve-env, deploy]
+    if: |
+      needs.deploy.result == 'success' &&
+      (needs.resolve-env.outputs.environment == 'Dev' ||
+       needs.resolve-env.outputs.environment == 'Staging')
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    env:
+      TARGET_ENV: ${{ needs.resolve-env.outputs.environment }}
+      GH_TOKEN:   ${{ secrets.REPO_DISPATCH_PAT }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.REPO_DISPATCH_PAT }}
+
+      - name: Resolve next environment
+        id: next
+        run: |
+          if [ "${{ env.TARGET_ENV }}" = "Dev" ]; then
+            echo "env=Staging" >> $GITHUB_OUTPUT
+          else
+            echo "env=Prod" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Read current module versions from source env
+        id: versions
+        run: |
+          set -euo pipefail
+          SRC="${{ env.TARGET_ENV }}"
+
+          # Extract ref= values from each terragrunt.hcl
+          VPC_VER=$(grep -oP '(?<=ref=)[^\s"]+' ${SRC}/vpc/terragrunt.hcl | head -1)
+          EKS_VER=$(grep -oP '(?<=ref=)[^\s"]+' ${SRC}/eks/terragrunt.hcl | head -1)
+          K8S_VER=$(grep -oP '(?<=ref=)[^\s"]+' ${SRC}/kubernetes-addons/terragrunt.hcl | head -1)
+
+          echo "vpc=$VPC_VER"                 >> $GITHUB_OUTPUT
+          echo "eks=$EKS_VER"                 >> $GITHUB_OUTPUT
+          echo "kubernetes_addons=$K8S_VER"   >> $GITHUB_OUTPUT
+          echo "Versions to promote: vpc=$VPC_VER eks=$EKS_VER k8s-addons=$K8S_VER"
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin \
+            https://x-access-token:${{ secrets.REPO_DISPATCH_PAT }}@github.com/musaumakau/infrastructure-live.git
+
+      - name: Create promotion branch and bump versions
+        id: branch
+        run: |
+          set -euo pipefail
+          NEXT="${{ steps.next.outputs.env }}"
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:7}"
+          BRANCH="promote/${NEXT,,}-${SHORT_SHA}"
+
+          git checkout -b "$BRANCH"
+
+          # Bump vpc version
+          sed -i "s|ref=[^ \"]*vpc[^ \"]*|ref=${{ steps.versions.outputs.vpc }}|g" \
+            ${NEXT}/vpc/terragrunt.hcl
+
+          # Bump eks version
+          sed -i "s|ref=[^ \"]*eks[^ \"]*|ref=${{ steps.versions.outputs.eks }}|g" \
+            ${NEXT}/eks/terragrunt.hcl
+
+          # Bump kubernetes-addons version
+          sed -i "s|ref=[^ \"]*kubernetes-addons[^ \"]*|ref=${{ steps.versions.outputs.kubernetes_addons }}|g" \
+            ${NEXT}/kubernetes-addons/terragrunt.hcl
+
+          git add ${NEXT}/
+          git diff --cached --stat
+
+          git commit -m "promote(${{ env.TARGET_ENV }}→${NEXT}): bump module versions to ${{ github.sha }}"
+          git push origin "$BRANCH"
+
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "next=$NEXT"     >> $GITHUB_OUTPUT
+
+      - name: Open pull request
+        run: |
+          set -euo pipefail
+          NEXT="${{ steps.branch.outputs.next }}"
+          BRANCH="${{ steps.branch.outputs.branch }}"
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "promote(${{ env.TARGET_ENV }}→${NEXT}): $(date -u +%Y-%m-%d) · ${{ github.sha }}" \
+            --body "## Promotion: ${{ env.TARGET_ENV }} → ${NEXT}
+
+          Automated promotion PR opened after successful **${{ env.TARGET_ENV }}** deploy.
+
+          ### Module versions being promoted
+          | Module | Version |
+          |---|---|
+          | vpc | \`${{ steps.versions.outputs.vpc }}\` |
+          | eks | \`${{ steps.versions.outputs.eks }}\` |
+          | kubernetes-addons | \`${{ steps.versions.outputs.kubernetes_addons }}\` |
+
+          ### What to check before merging
+          - [ ] ${{ env.TARGET_ENV }} deploy completed without errors
+          - [ ] No unexpected resource changes in gate job logs
+          - [ ] Blast radius score is acceptable for ${NEXT}
+
+          ### How to promote
+          Review and merge this PR. The deploy pipeline will automatically
+          trigger for **${NEXT}** when this PR merges to main.
+
+          ---
+          *Triggered by commit \`${{ github.sha }}\` · Run [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*"
