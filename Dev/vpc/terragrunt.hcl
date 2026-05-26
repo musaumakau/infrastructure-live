@@ -1,5 +1,5 @@
 terraform {
-  source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//vpc?ref=vpc-v0.0.2"
+  source = "git::https://${get_env("REPO_DISPATCH_PAT", "")}@github.com/musaumakau/infrastructure-modules.git//vpc?ref=feat/tag-enforcement-module"
 }
 
 include "root" {
@@ -31,4 +31,9 @@ inputs = {
     "kubernetes.io/role/elb"    = 1
     "kubernetes.io/cluster/Dev" = "owned"
   }
+
+  project     = "infrastructure-modules"
+  environment = lower(include.env.locals.env)
+  owner       = "engineering"
+  cost_center = "CC-0001"
 }
