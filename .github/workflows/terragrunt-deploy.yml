@@ -236,8 +236,7 @@ jobs:
             echo "drift_findings=[]"     >> $GITHUB_OUTPUT
             exit 0
           fi
-
-          cp $GITHUB_WORKSPACE/tfplan-deploy.json tfplan-deploy.json
+          
 
           python3 << 'EOF'
           import json, os
