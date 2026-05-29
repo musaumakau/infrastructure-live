@@ -122,7 +122,17 @@ jobs:
 # =============================================================================
 # JOB 2: Plan Comparison Gate (matrix: vpc, eks)
 # Re-plans each module and compares against the S3 manifest saved at PR time.
-# Auto-approves if resource addresses match; flags surprises for review.
+#
+# Phase 1: checks resource addresses + actions (original gate)
+# Phase 2: checks critical property drift for fingerprinted resource types
+#          aws_security_group, aws_iam_role, aws_s3_bucket
+#          Skipped automatically for v1 manifests (no fingerprints) so
+#          rollout is safe — existing deploys are unaffected.
+#
+# ENV thresholds:
+#   Dev     → warn only, never blocks (observe + calibrate)
+#   Staging → block on drift score >= 70
+#   Prod    → block on drift score >= 40
 # =============================================================================
   gate:
     name: "Plan Comparison Gate [${{ matrix.module }}]"
@@ -138,6 +148,7 @@ jobs:
     outputs:
       needs_approval: ${{ steps.compare.outputs.needs_approval }}
       reason:         ${{ steps.compare.outputs.reason }}
+      max_drift_score: ${{ steps.compare.outputs.max_drift_score }}
 
     strategy:
       matrix:
@@ -212,22 +223,134 @@ jobs:
 
       - name: Compare plans
         id: compare
+        env:
+          TARGET_ENV: ${{ needs.resolve-env.outputs.environment }}
         run: |
+          set -euo pipefail
+
+          # Missing manifest → immediate block, same as before
           if [ "${{ steps.fetch.outputs.found }}" != "true" ]; then
-            echo "needs_approval=true" >> $GITHUB_OUTPUT
-            echo "reason=No manifest found in S3 for this SHA — manual review required" >> $GITHUB_OUTPUT
+            echo "needs_approval=true"   >> $GITHUB_OUTPUT
+            echo "reason=No manifest found in S3 for SHA ${{ needs.resolve-env.outputs.sha }} — manual review required" >> $GITHUB_OUTPUT
+            echo "max_drift_score=0"     >> $GITHUB_OUTPUT
+            echo "drift_findings=[]"     >> $GITHUB_OUTPUT
             exit 0
           fi
+
+          cp $GITHUB_WORKSPACE/tfplan-deploy.json tfplan-deploy.json
 
           python3 << 'EOF'
           import json, os
 
+          # ---------------------------------------------------------------
+          # Drift severity thresholds per environment.
+          # fail_on: drift score >= this blocks the deploy
+          # warn_on: drift score >= this warns but allows proceed
+          # Dev is warn-only so you can observe scoring before it gates prod.
+          # ---------------------------------------------------------------
+          ENV_POLICY = {
+              'Dev':     {'fail_on': 999, 'warn_on': 30},
+              'Staging': {'fail_on': 70,  'warn_on': 30},
+              'Prod':    {'fail_on': 40,  'warn_on': 20},
+          }
+
+          # Severity score per property — how dangerous is drift here?
+          PROPERTY_SEVERITY = {
+              'ingress':                              80,
+              'egress':                               60,
+              'assume_role_policy':                   90,
+              'managed_policy_arns':                  85,
+              'inline_policy':                        85,
+              'permissions_boundary':                 70,
+              'max_session_duration':                 30,
+              'public_access_block':                  95,
+              'server_side_encryption_configuration': 90,
+              'versioning':                           50,
+              'bucket_policy':                        85,
+          }
+
+          # Properties to fingerprint per resource type.
+          # capture: extract and compare these
+          # ignore:  volatile fields — tags, ARNs, timestamps, computed IDs
+          FINGERPRINT_SCHEMA = {
+              'aws_security_group': {
+                  'capture': ['ingress', 'egress'],
+                  'ignore':  ['tags', 'tags_all', 'description', 'name',
+                              'timeouts', 'id', 'arn'],
+              },
+              'aws_iam_role': {
+                  'capture': ['assume_role_policy', 'managed_policy_arns',
+                              'inline_policy', 'permissions_boundary',
+                              'max_session_duration'],
+                  'ignore':  ['tags', 'tags_all', 'description', 'name',
+                              'path', 'id', 'arn', 'unique_id', 'create_date'],
+              },
+              'aws_s3_bucket': {
+                  'capture': ['bucket_policy',
+                              'server_side_encryption_configuration',
+                              'versioning', 'public_access_block'],
+                  'ignore':  ['tags', 'tags_all', 'bucket', 'id', 'arn',
+                              'hosted_zone_id', 'region', 'bucket_domain_name',
+                              'bucket_regional_domain_name', 'website_endpoint'],
+              },
+          }
+
+          def normalize(value):
+              """
+              Canonical form for comparison.
+              Sorts dict keys and list-of-dicts so ordering differences
+              in ingress/egress rules don't cause false alarms.
+              Must stay identical to the normalize() in the manifest writer.
+              """
+              if isinstance(value, dict):
+                  return {k: normalize(v) for k, v in sorted(value.items())}
+              if isinstance(value, list):
+                  normalized = [normalize(i) for i in value]
+                  try:
+                      return sorted(normalized,
+                                    key=lambda x: json.dumps(x, sort_keys=True))
+                  except TypeError:
+                      return normalized
+              if isinstance(value, str):
+                  return value.strip()
+              return value
+
+          def diff_fingerprints(pr_fp, deploy_fp):
+              """
+              Compare two fingerprints property by property.
+              Skips properties missing from deploy_fp — those were
+              after_unknown at deploy time and can't be compared.
+              """
+              findings = []
+              for prop, pr_val in pr_fp.items():
+                  if prop not in deploy_fp:
+                      continue
+                  deploy_val = deploy_fp[prop]
+                  if pr_val != deploy_val:
+                      findings.append({
+                          'property':     prop,
+                          'severity':     PROPERTY_SEVERITY.get(prop, 10),
+                          'pr_value':     pr_val,
+                          'deploy_value': deploy_val,
+                      })
+              return findings
+
+          # ---------------------------------------------------------------
+          # Load manifests
+          # ---------------------------------------------------------------
           with open('pr-manifest.json') as f:
               pr = json.load(f)
 
-          with open('tfplan-deploy.json') as f:
+          with open(os.environ['GITHUB_WORKSPACE'] + '/tfplan-deploy.json') as f:
               deploy_plan = json.load(f)
 
+          environment = os.environ.get('TARGET_ENV', 'Prod')
+          policy      = ENV_POLICY.get(environment, ENV_POLICY['Prod'])
+          manifest_v  = pr.get('manifest_version', 1)
+
+          # ---------------------------------------------------------------
+          # Phase 1 — address + action surprises (original gate, unchanged)
+          # ---------------------------------------------------------------
           pr_resources = {r['address']: r['actions'] for r in pr['resources']}
 
           deploy_resources = {
@@ -242,23 +365,139 @@ jobs:
               if addr not in pr_resources
           }
 
+          # ---------------------------------------------------------------
+          # Phase 2 — semantic property drift
+          # Skipped if manifest_version < 2 (no fingerprints available).
+          # Safe rollout: old manifests in S3 pass through unchanged.
+          # ---------------------------------------------------------------
+          drift_findings  = []
+          max_drift_score = 0
+
+          if manifest_v >= 2:
+              pr_fingerprints = {
+                  r['address']: r.get('fingerprint')
+                  for r in pr['resources']
+                  if r.get('fingerprint')
+              }
+
+              for r in deploy_plan.get('resource_changes', []):
+                  if r['change']['actions'] == ['no-op']:
+                      continue
+
+                  addr   = r['address']
+                  rtype  = r['type']
+                  schema = FINGERPRINT_SCHEMA.get(rtype)
+                  pr_fp  = pr_fingerprints.get(addr)
+
+                  if not schema or not pr_fp:
+                      continue
+
+                  after_values  = r['change'].get('after') or {}
+                  after_unknown = r['change'].get('after_unknown') or {}
+                  unknown_keys  = (
+                      {k for k, v in after_unknown.items() if v is True}
+                      if isinstance(after_unknown, dict) else set()
+                  )
+
+                  deploy_fp = {
+                      prop: normalize(after_values[prop])
+                      for prop in schema['capture']
+                      if prop not in unknown_keys and prop in after_values
+                  }
+
+                  for finding in diff_fingerprints(pr_fp, deploy_fp):
+                      drift_findings.append({
+                          'address':      addr,
+                          'property':     finding['property'],
+                          'severity':     finding['severity'],
+                          'pr_value':     finding['pr_value'],
+                          'deploy_value': finding['deploy_value'],
+                      })
+                      if finding['severity'] > max_drift_score:
+                          max_drift_score = finding['severity']
+
+          # ---------------------------------------------------------------
+          # Gate decision
+          # ---------------------------------------------------------------
+          phase1_fail = bool(surprises)
+          phase2_fail = max_drift_score >= policy['fail_on']
+          phase2_warn = max_drift_score >= policy['warn_on'] and not phase2_fail
+
+          needs_approval = phase1_fail or phase2_fail
+
+          reasons = []
+          if phase1_fail:
+              reasons.append(
+                  f"Phase 1 — {len(surprises)} unreviewed resource(s): "
+                  f"{list(surprises.keys())}"
+              )
+          if phase2_fail:
+              high = [f for f in drift_findings
+                      if f['severity'] >= policy['fail_on']]
+              reasons.append(
+                  f"Phase 2 — critical property drift (max score "
+                  f"{max_drift_score}, threshold {policy['fail_on']}) in: "
+                  f"{list({f['address'] for f in high})}"
+              )
+          if phase2_warn and not needs_approval:
+              reasons.append(
+                  f"Phase 2 — property drift (max score {max_drift_score}, "
+                  f"warn threshold {policy['warn_on']}) — allowed in {environment}"
+              )
+          if not reasons:
+              reasons.append("All resources and properties match PR plan")
+
+          reason = " | ".join(reasons)
+
+          # ---------------------------------------------------------------
+          # Outputs
+          # ---------------------------------------------------------------
           with open(os.environ['GITHUB_OUTPUT'], 'a') as gh:
-              if surprises:
-                  gh.write("needs_approval=true\n")
-                  gh.write(f"reason=Deploy plan contains {len(surprises)} resources not reviewed in PR: {list(surprises.keys())}\n")
-                  print(f"WARNING — unexpected resources: {surprises}")
+              gh.write(f"needs_approval={'true' if needs_approval else 'false'}\n")
+              gh.write(f"reason={reason}\n")
+              gh.write(f"max_drift_score={max_drift_score}\n")
+              gh.write(f"drift_findings={json.dumps(drift_findings)}\n")
+
+          # Console output visible in the GHA log
+          print(f"\n{'='*60}")
+          print(f"GATE RESULT — {environment} / manifest v{manifest_v}")
+          print(f"{'='*60}")
+          print(f"Phase 1 (address check):  {'FAIL' if phase1_fail else 'PASS'}")
+          if manifest_v >= 2:
+              status = 'FAIL' if phase2_fail else 'WARN' if phase2_warn else 'PASS'
+              print(f"Phase 2 (property drift): {status}")
+              print(f"  Max drift score: {max_drift_score} "
+                    f"(fail>={policy['fail_on']}, warn>={policy['warn_on']})")
+              if drift_findings:
+                  print(f"\n  Drift findings ({len(drift_findings)}):")
+                  for f in sorted(drift_findings, key=lambda x: -x['severity']):
+                      print(f"  [{f['severity']:>3}] {f['address']} → {f['property']}")
               else:
-                  gh.write("needs_approval=false\n")
-                  gh.write("reason=All resources reviewed in PR\n")
-                  print("AUTO-APPROVED — deploy matches PR plan")
+                  print("  No property drift detected")
+          else:
+              print("Phase 2 (property drift): SKIPPED — v1 manifest")
+              print("  Next PR onwards will include fingerprints")
+          print(f"\nDecision: {'BLOCK' if needs_approval else 'AUTO-APPROVE'}")
+          print(f"Reason:   {reason}")
+          print('='*60)
           EOF
 
       - name: Log gate result
         run: |
-          echo "Environment:    ${{ env.TARGET_ENV }}"
-          echo "Module:         ${{ matrix.module }}"
-          echo "Needs approval: ${{ steps.compare.outputs.needs_approval }}"
-          echo "Reason:         ${{ steps.compare.outputs.reason }}"
+          echo "Environment:     ${{ env.TARGET_ENV }}"
+          echo "Module:          ${{ matrix.module }}"
+          echo "Needs approval:  ${{ steps.compare.outputs.needs_approval }}"
+          echo "Max drift score: ${{ steps.compare.outputs.max_drift_score }}"
+          echo "Reason:          ${{ steps.compare.outputs.reason }}"
+
+      - name: Enforce gate decision
+        run: |
+          if [ "${{ steps.compare.outputs.needs_approval }}" = "true" ]; then
+            echo "::error::Gate blocked deploy for module ${{ matrix.module }}"
+            echo "::error::${{ steps.compare.outputs.reason }}"
+            exit 1
+          fi
+          echo "Gate passed — proceeding to deploy"
 
 # =============================================================================
 # JOB 3: Deploy
@@ -360,14 +599,13 @@ jobs:
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
 
 # =============================================================================
-# =============================================================================
 # JOB 4: Promote to next environment
-# After a successful deploy, triggers workflow_dispatch for the next env.
+# After a successful deploy, triggers the next environment.
 #   Dev     → fires repository_dispatch trigger-staging
 #   Staging → fires repository_dispatch trigger-prod
 #   Prod    → no-op (end of pipeline)
 #
-# Using repository_dispatch instead of a push-triggered PR means adding new
+# Using repository_dispatch instead of a push trigger means adding new
 # environment configs to main never accidentally triggers a deploy.
 # =============================================================================
   promote:
