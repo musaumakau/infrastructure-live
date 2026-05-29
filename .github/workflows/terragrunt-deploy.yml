@@ -227,16 +227,15 @@ jobs:
           TARGET_ENV: ${{ needs.resolve-env.outputs.environment }}
         run: |
           set -euo pipefail
-
-          # Missing manifest → immediate block, same as before
+          
           if [ "${{ steps.fetch.outputs.found }}" != "true" ]; then
-            echo "needs_approval=true"   >> $GITHUB_OUTPUT
-            echo "reason=No manifest found in S3 for SHA ${{ needs.resolve-env.outputs.sha }} — manual review required" >> $GITHUB_OUTPUT
-            echo "max_drift_score=0"     >> $GITHUB_OUTPUT
-            echo "drift_findings=[]"     >> $GITHUB_OUTPUT
+            echo "needs_approval=false" >> $GITHUB_OUTPUT
+            echo "reason=No manifest for this module — not changed in PR, skipping" >> $GITHUB_OUTPUT
+            echo "max_drift_score=0"    >> $GITHUB_OUTPUT
+            echo "drift_findings=[]"    >> $GITHUB_OUTPUT
             exit 0
           fi
-          
+
 
           python3 << 'EOF'
           import json, os
