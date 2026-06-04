@@ -471,6 +471,12 @@ jobs:
     if: always() && !failure() && !cancelled() && needs.resolve-env.outputs.environment != 'none'
     timeout-minutes: 60
 
+    # Targets production-approval environment for Prod deploys only.
+    # GitHub pauses the job here and notifies required reviewers.
+    # Reviewers see the gate output before approving — not a blind approval.
+    # Dev and Staging deploy without any environment gate.
+    environment: ${{ needs.resolve-env.outputs.environment == 'Prod' && 'production-approval' || '' }}
+
     permissions:
       id-token: write
       contents: read
