@@ -16,11 +16,9 @@
 # TRIGGERS:
 #   repository_dispatch  — fired by infrastructure-modules on merge to main
 #                          always targets Dev
-#   workflow_dispatch    — manual re-runs and dry-run testing
-#   push                 — feat/modularize-deploy-workflow branch ONLY
-#                          REMOVE before merging to main
+#   workflow_dispatch    — manual re-runs only
 #
-# NOTE: No push trigger on main — adding environment configs never triggers
+# NOTE: No push trigger — adding environment configs to main never triggers
 #       a deploy. Only explicit dispatches do.
 #
 # COMPOSITE ACTIONS (all under .github/actions/):
@@ -39,11 +37,6 @@
 name: Terragrunt Deploy
 
 on:
-  # ── TEMPORARY: remove before merging to main ──────────────────────────────
-  push:
-    branches:
-      - feat/modularize-deploy-workflow
-
   repository_dispatch:
     types: [trigger-deploy, trigger-staging, trigger-prod]
 
@@ -57,11 +50,6 @@ on:
       sha:
         description: 'Commit SHA (leave blank to use HEAD)'
         required: false
-      dry-run:
-        description: 'Skip all applies and promotion — test wiring only'
-        required: false
-        type: boolean
-        default: false
 
 # Never cancel an in-progress deploy — a cancelled apply leaves state partial
 concurrency:
@@ -86,7 +74,6 @@ jobs:
     outputs:
       environment: ${{ steps.detect.outputs.environment }}
       sha:         ${{ steps.detect.outputs.sha }}
-      dry-run:     ${{ steps.detect.outputs.dry-run }}
 
     steps:
       - name: Checkout
@@ -102,20 +89,11 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENV="${{ inputs.environment }}"
             SHA="${{ inputs.sha || github.sha }}"
-            DRY_RUN="${{ inputs.dry-run }}"
-            echo "Manual dispatch — environment: $ENV, sha: $SHA, dry-run: $DRY_RUN"
-
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            # Temporary push trigger for branch testing — always Dev, always dry-run
-            ENV="Dev"
-            SHA="${{ github.sha }}"
-            DRY_RUN="true"
-            echo "Push trigger (branch test) — environment: $ENV, sha: $SHA, dry-run: $DRY_RUN"
+            echo "Manual dispatch — environment: $ENV, sha: $SHA"
 
           elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             ACTION="${{ github.event.action }}"
             SHA="${{ github.event.client_payload.sha }}"
-            DRY_RUN="false"
 
             if   [ "$ACTION" = "trigger-deploy"  ]; then ENV="Dev"
             elif [ "$ACTION" = "trigger-staging" ]; then ENV="Staging"
@@ -133,7 +111,6 @@ jobs:
 
           echo "environment=$ENV" >> $GITHUB_OUTPUT
           echo "sha=$SHA"         >> $GITHUB_OUTPUT
-          echo "dry-run=$DRY_RUN" >> $GITHUB_OUTPUT
 
 # =============================================================================
 # JOB 2: Plan Comparison Gate (matrix: vpc, eks)
@@ -526,39 +503,30 @@ jobs:
           done
 
       - name: Apply VPC
-        if: needs.resolve-env.outputs.dry-run != 'true'
         run: |
           set -euo pipefail
           cd "${{ env.TARGET_ENV }}/vpc"
           terragrunt apply --non-interactive --auto-approve
 
       - name: Apply EKS
-        if: needs.resolve-env.outputs.dry-run != 'true'
         run: |
           set -euo pipefail
           cd "${{ env.TARGET_ENV }}/eks"
           terragrunt apply --non-interactive --auto-approve
 
       - name: Configure kubeconfig
-        if: needs.resolve-env.outputs.dry-run != 'true'
         uses: ./.github/actions/eks-kubeconfig
         with:
           environment: ${{ env.TARGET_ENV }}
           aws-region:  eu-west-1
 
       - name: Apply Kubernetes Addons
-        if: needs.resolve-env.outputs.dry-run != 'true'
         env:
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
           cd "${{ env.TARGET_ENV }}/kubernetes-addons"
           terragrunt apply --non-interactive --auto-approve
-
-      - name: Dry-run summary
-        if: needs.resolve-env.outputs.dry-run == 'true'
-        run: |
-          echo "::notice::DRY-RUN — all apply steps skipped. Wiring, auth, setup, gate, plan, and validate all passed."
 
 # =============================================================================
 # JOB 4: Promote to next environment
@@ -572,7 +540,6 @@ jobs:
     needs: [resolve-env, deploy]
     if: |
       needs.deploy.result == 'success' &&
-      needs.resolve-env.outputs.dry-run != 'true' &&
       (needs.resolve-env.outputs.environment == 'Dev' ||
        needs.resolve-env.outputs.environment == 'Staging')
 
