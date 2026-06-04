@@ -1,0 +1,34 @@
+name: EKS Kubeconfig
+description: >
+  Fetches the EKS cluster name from Terragrunt output and
+  configures kubectl. Verifies node access before returning.
+  Only used in the deploy job after Apply EKS completes.
+
+inputs:
+  environment:
+    description: 'Target environment directory (Dev / Staging / Prod)'
+    required: true
+  aws-region:
+    description: 'AWS region where the cluster lives'
+    required: false
+    default: 'eu-west-1'
+
+runs:
+  using: composite
+  steps:
+    - name: Configure kubeconfig
+      shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+        AWS_REGION:  ${{ inputs.aws-region }}
+      run: |
+        set -euo pipefail
+        CLUSTER_NAME=$(cd "${TARGET_ENV}/eks" && terragrunt output -raw eks_name)
+        echo "Cluster: $CLUSTER_NAME"
+        rm -f ~/.kube/config
+        aws eks update-kubeconfig \
+          --name "$CLUSTER_NAME" \
+          --region "$AWS_REGION"
+        sleep 5
+        kubectl auth can-i get nodes
+        kubectl get nodes

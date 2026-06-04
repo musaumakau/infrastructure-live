@@ -17,13 +17,17 @@
 #   repository_dispatch  — fired by infrastructure-modules on merge to main
 #                          always targets Dev
 #   workflow_dispatch    — manual re-runs only
-#                          also used for manual re-runs of a failed deploy
 #
 # NOTE: No push trigger — adding environment configs to main never triggers
 #       a deploy. Only explicit dispatches do.
 #
+# COMPOSITE ACTIONS (all under .github/actions/):
+#   aws-auth          — OIDC credential configuration (no long-lived keys)
+#   terragrunt-setup  — Terraform + Terragrunt installation
+#   eks-kubeconfig    — EKS cluster name resolution + kubectl config
+#
 # REQUIRED SECRETS:
-#   REPO_DISPATCH_PAT      — PAT for cross-repo PR creation and dispatch
+#   REPO_DISPATCH_PAT      — PAT for cross-repo dispatch
 #   GRAFANA_ADMIN_PASSWORD — passed through to kubernetes-addons
 #
 # REQUIRED VARIABLES:
@@ -33,13 +37,9 @@
 name: Terragrunt Deploy
 
 on:
-  # trigger-deploy   — fired by infrastructure-modules on merge to main → Dev
-  # trigger-staging  — fired by promote job after successful Dev deploy
-  # trigger-prod     — fired by promote job after successful Staging deploy
   repository_dispatch:
     types: [trigger-deploy, trigger-staging, trigger-prod]
 
-  # Manual re-run of a failed deploy
   workflow_dispatch:
     inputs:
       environment:
@@ -77,7 +77,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           fetch-depth: 2
 
@@ -86,31 +86,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          # workflow_dispatch — explicit input wins
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ENV="${{ inputs.environment }}"
             SHA="${{ inputs.sha || github.sha }}"
             echo "Manual dispatch — environment: $ENV, sha: $SHA"
 
-          # repository_dispatch — event action determines target environment
           elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             ACTION="${{ github.event.action }}"
             SHA="${{ github.event.client_payload.sha }}"
 
-            if [ "$ACTION" = "trigger-deploy" ]; then
-              ENV="Dev"
-            elif [ "$ACTION" = "trigger-staging" ]; then
-              ENV="Staging"
-            elif [ "$ACTION" = "trigger-prod" ]; then
-              ENV="Prod"
+            if   [ "$ACTION" = "trigger-deploy"  ]; then ENV="Dev"
+            elif [ "$ACTION" = "trigger-staging" ]; then ENV="Staging"
+            elif [ "$ACTION" = "trigger-prod"    ]; then ENV="Prod"
             else
               echo "ERROR: unknown dispatch action: $ACTION"
               exit 1
             fi
 
             echo "Repository dispatch — action: $ACTION, environment: $ENV, sha: $SHA"
-
-          # fallback — should not be reached with current triggers
           else
             echo "ERROR: unexpected event type ${{ github.event_name }}"
             exit 1
@@ -123,14 +116,13 @@ jobs:
 # JOB 2: Plan Comparison Gate (matrix: vpc, eks)
 # Re-plans each module and compares against the S3 manifest saved at PR time.
 #
-# Phase 1: checks resource addresses + actions (original gate)
+# Phase 1: checks resource addresses + actions
 # Phase 2: checks critical property drift for fingerprinted resource types
 #          aws_security_group, aws_iam_role, aws_s3_bucket
-#          Skipped automatically for v1 manifests (no fingerprints) so
-#          rollout is safe — existing deploys are unaffected.
+#          Skipped automatically for v1 manifests — safe rollout.
 #
 # ENV thresholds:
-#   Dev     → warn only, never blocks (observe + calibrate)
+#   Dev     → warn only, never blocks
 #   Staging → block on drift score >= 70
 #   Prod    → block on drift score >= 40
 # =============================================================================
@@ -146,14 +138,13 @@ jobs:
       contents: read
 
     outputs:
-      needs_approval: ${{ steps.compare.outputs.needs_approval }}
-      reason:         ${{ steps.compare.outputs.reason }}
+      needs_approval:  ${{ steps.compare.outputs.needs_approval }}
+      reason:          ${{ steps.compare.outputs.reason }}
       max_drift_score: ${{ steps.compare.outputs.max_drift_score }}
 
     strategy:
       matrix:
         module: [vpc, eks]
-        # kubernetes-addons excluded — depends on live cluster
       fail-fast: false
 
     env:
@@ -161,28 +152,20 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: AWS auth
+        uses: ./.github/actions/aws-auth
         with:
-          role-to-assume:    arn:aws:iam::649203810550:role/EksOIDCRole
-          aws-region:        eu-west-1
-          role-session-name: "github-actions-gate-${{ github.run_id }}"
+          role-arn:            arn:aws:iam::649203810550:role/EksOIDCRole
+          aws-region:          eu-west-1
+          session-name-suffix: "gate-${{ matrix.module }}-${{ github.run_id }}"
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+      - name: Terraform + Terragrunt setup
+        uses: ./.github/actions/terragrunt-setup
         with:
-          terraform_version: 1.7.5
-          terraform_wrapper: false
-
-      - name: Install Terragrunt
-        run: |
-          set -euo pipefail
-          TERRAGRUNT_VERSION="0.84.1"
-          curl -L -o terragrunt \
-            https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
-          chmod +x terragrunt && sudo mv terragrunt /usr/local/bin/
+          terraform-version:  '1.7.5'
+          terragrunt-version: '0.84.1'
 
       - name: Fetch manifest from S3
         id: fetch
@@ -197,8 +180,8 @@ jobs:
           fi
 
           KEY="deploy-pointer/${SHA}/${{ matrix.module }}/manifest.json"
-          aws s3 cp s3://${{ vars.PLAN_MANIFEST_BUCKET }}/${KEY} pr-manifest.json \
-            && echo "found=true" >> $GITHUB_OUTPUT \
+          aws s3 cp "s3://${{ vars.PLAN_MANIFEST_BUCKET }}/${KEY}" pr-manifest.json \
+            && echo "found=true"  >> $GITHUB_OUTPUT \
             || echo "found=false" >> $GITHUB_OUTPUT
 
       - name: Re-plan
@@ -208,7 +191,7 @@ jobs:
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
-          cd ${{ env.TARGET_ENV }}/${{ matrix.module }}
+          cd "${{ env.TARGET_ENV }}/${{ matrix.module }}"
           terragrunt init --upgrade
           terragrunt plan --non-interactive -out=tfplan.binary
 
@@ -218,8 +201,8 @@ jobs:
             exit 1
           fi
 
-          terraform -chdir="$CACHE_DIR" show -json tfplan.binary > tfplan-deploy.json
-          cp tfplan-deploy.json $GITHUB_WORKSPACE/tfplan-deploy.json
+          terraform -chdir="$CACHE_DIR" show -json tfplan.binary \
+            > "$GITHUB_WORKSPACE/tfplan-deploy.json"
 
       - name: Compare plans
         id: compare
@@ -227,7 +210,7 @@ jobs:
           TARGET_ENV: ${{ needs.resolve-env.outputs.environment }}
         run: |
           set -euo pipefail
-          
+
           if [ "${{ steps.fetch.outputs.found }}" != "true" ]; then
             echo "needs_approval=false" >> $GITHUB_OUTPUT
             echo "reason=No manifest for this module — not changed in PR, skipping" >> $GITHUB_OUTPUT
@@ -236,23 +219,15 @@ jobs:
             exit 0
           fi
 
-
           python3 << 'EOF'
           import json, os
 
-          # ---------------------------------------------------------------
-          # Drift severity thresholds per environment.
-          # fail_on: drift score >= this blocks the deploy
-          # warn_on: drift score >= this warns but allows proceed
-          # Dev is warn-only so you can observe scoring before it gates prod.
-          # ---------------------------------------------------------------
           ENV_POLICY = {
               'Dev':     {'fail_on': 999, 'warn_on': 30},
               'Staging': {'fail_on': 70,  'warn_on': 30},
               'Prod':    {'fail_on': 40,  'warn_on': 20},
           }
 
-          # Severity score per property — how dangerous is drift here?
           PROPERTY_SEVERITY = {
               'ingress':                              80,
               'egress':                               60,
@@ -267,9 +242,6 @@ jobs:
               'bucket_policy':                        85,
           }
 
-          # Properties to fingerprint per resource type.
-          # capture: extract and compare these
-          # ignore:  volatile fields — tags, ARNs, timestamps, computed IDs
           FINGERPRINT_SCHEMA = {
               'aws_security_group': {
                   'capture': ['ingress', 'egress'],
@@ -294,12 +266,6 @@ jobs:
           }
 
           def normalize(value):
-              """
-              Canonical form for comparison.
-              Sorts dict keys and list-of-dicts so ordering differences
-              in ingress/egress rules don't cause false alarms.
-              Must stay identical to the normalize() in the manifest writer.
-              """
               if isinstance(value, dict):
                   return {k: normalize(v) for k, v in sorted(value.items())}
               if isinstance(value, list):
@@ -314,28 +280,19 @@ jobs:
               return value
 
           def diff_fingerprints(pr_fp, deploy_fp):
-              """
-              Compare two fingerprints property by property.
-              Skips properties missing from deploy_fp — those were
-              after_unknown at deploy time and can't be compared.
-              """
               findings = []
               for prop, pr_val in pr_fp.items():
                   if prop not in deploy_fp:
                       continue
-                  deploy_val = deploy_fp[prop]
-                  if pr_val != deploy_val:
+                  if pr_val != deploy_fp[prop]:
                       findings.append({
-                          'property':     prop,
-                          'severity':     PROPERTY_SEVERITY.get(prop, 10),
+                          'property': prop,
+                          'severity': PROPERTY_SEVERITY.get(prop, 10),
                           'pr_value':     pr_val,
-                          'deploy_value': deploy_val,
+                          'deploy_value': deploy_fp[prop],
                       })
               return findings
 
-          # ---------------------------------------------------------------
-          # Load manifests
-          # ---------------------------------------------------------------
           with open('pr-manifest.json') as f:
               pr = json.load(f)
 
@@ -346,28 +303,20 @@ jobs:
           policy      = ENV_POLICY.get(environment, ENV_POLICY['Prod'])
           manifest_v  = pr.get('manifest_version', 1)
 
-          # ---------------------------------------------------------------
-          # Phase 1 — address + action surprises (original gate, unchanged)
-          # ---------------------------------------------------------------
+          # Phase 1 — address + action surprises
           pr_resources = {r['address']: r['actions'] for r in pr['resources']}
-
           deploy_resources = {
               r['address']: r['change']['actions']
               for r in deploy_plan.get('resource_changes', [])
               if r['change']['actions'] != ['no-op']
           }
-
           surprises = {
               addr: actions
               for addr, actions in deploy_resources.items()
               if addr not in pr_resources
           }
 
-          # ---------------------------------------------------------------
-          # Phase 2 — semantic property drift
-          # Skipped if manifest_version < 2 (no fingerprints available).
-          # Safe rollout: old manifests in S3 pass through unchanged.
-          # ---------------------------------------------------------------
+          # Phase 2 — semantic property drift (v2 manifests only)
           drift_findings  = []
           max_drift_score = 0
 
@@ -414,13 +363,10 @@ jobs:
                       if finding['severity'] > max_drift_score:
                           max_drift_score = finding['severity']
 
-          # ---------------------------------------------------------------
           # Gate decision
-          # ---------------------------------------------------------------
           phase1_fail = bool(surprises)
           phase2_fail = max_drift_score >= policy['fail_on']
           phase2_warn = max_drift_score >= policy['warn_on'] and not phase2_fail
-
           needs_approval = phase1_fail or phase2_fail
 
           reasons = []
@@ -430,8 +376,7 @@ jobs:
                   f"{list(surprises.keys())}"
               )
           if phase2_fail:
-              high = [f for f in drift_findings
-                      if f['severity'] >= policy['fail_on']]
+              high = [f for f in drift_findings if f['severity'] >= policy['fail_on']]
               reasons.append(
                   f"Phase 2 — critical property drift (max score "
                   f"{max_drift_score}, threshold {policy['fail_on']}) in: "
@@ -447,16 +392,12 @@ jobs:
 
           reason = " | ".join(reasons)
 
-          # ---------------------------------------------------------------
-          # Outputs
-          # ---------------------------------------------------------------
           with open(os.environ['GITHUB_OUTPUT'], 'a') as gh:
               gh.write(f"needs_approval={'true' if needs_approval else 'false'}\n")
               gh.write(f"reason={reason}\n")
               gh.write(f"max_drift_score={max_drift_score}\n")
               gh.write(f"drift_findings={json.dumps(drift_findings)}\n")
 
-          # Console output visible in the GHA log
           print(f"\n{'='*60}")
           print(f"GATE RESULT — {environment} / manifest v{manifest_v}")
           print(f"{'='*60}")
@@ -469,12 +410,11 @@ jobs:
               if drift_findings:
                   print(f"\n  Drift findings ({len(drift_findings)}):")
                   for f in sorted(drift_findings, key=lambda x: -x['severity']):
-                      print(f"  [{f['severity']:>3}] {f['address']} → {f['property']}")
+                      print(f"  [{f['severity']:>3}] {f['address']} -> {f['property']}")
               else:
                   print("  No property drift detected")
           else:
               print("Phase 2 (property drift): SKIPPED — v1 manifest")
-              print("  Next PR onwards will include fingerprints")
           print(f"\nDecision: {'BLOCK' if needs_approval else 'AUTO-APPROVE'}")
           print(f"Reason:   {reason}")
           print('='*60)
@@ -499,7 +439,7 @@ jobs:
 
 # =============================================================================
 # JOB 3: Deploy
-# Applies vpc → eks → kubernetes-addons in order for the detected environment.
+# Applies vpc → eks → kubernetes-addons in order for the target environment.
 # =============================================================================
   deploy:
     name: "Deploy [${{ needs.resolve-env.outputs.environment }}]"
@@ -507,6 +447,12 @@ jobs:
     needs: [resolve-env, gate]
     if: always() && !failure() && !cancelled() && needs.resolve-env.outputs.environment != 'none'
     timeout-minutes: 60
+
+    # Targets production-approval environment for Prod deploys only.
+    # GitHub pauses the job here and notifies required reviewers.
+    # Reviewers see the gate output before approving — not a blind approval.
+    # Dev and Staging deploy without any environment gate.
+    environment: ${{ needs.resolve-env.outputs.environment == 'Prod' && 'production-approval' || '' }}
 
     permissions:
       id-token: write
@@ -522,31 +468,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: AWS auth
+        uses: ./.github/actions/aws-auth
         with:
-          role-to-assume:    arn:aws:iam::649203810550:role/EksOIDCRole
-          aws-region:        eu-west-1
-          role-session-name: "github-actions-deploy-${{ github.run_id }}"
+          role-arn:            arn:aws:iam::649203810550:role/EksOIDCRole
+          aws-region:          eu-west-1
+          session-name-suffix: "deploy-${{ github.run_id }}"
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+      - name: Terraform + Terragrunt setup
+        uses: ./.github/actions/terragrunt-setup
         with:
-          terraform_version: 1.7.5
-          terraform_wrapper: false
+          terraform-version:  '1.7.5'
+          terragrunt-version: '0.84.1'
 
-      - name: Install Terragrunt
-        run: |
-          set -euo pipefail
-          TERRAGRUNT_VERSION="0.84.1"
-          curl -L -o terragrunt \
-            https://github.com/gruntwork-io/terragrunt/releases/download/v${TERRAGRUNT_VERSION}/terragrunt_linux_amd64
-          chmod +x terragrunt && sudo mv terragrunt /usr/local/bin/
-          terragrunt --version
-
-      - name: Format Check
+      - name: Format check
         run: terragrunt hcl format --check --diff ${{ env.TARGET_ENV }} || true
 
       - name: Init all modules
@@ -554,7 +491,7 @@ jobs:
           set -euo pipefail
           for MODULE in vpc eks kubernetes-addons; do
             echo "── init ${{ env.TARGET_ENV }}/$MODULE ──"
-            (cd ${{ env.TARGET_ENV }}/$MODULE && terragrunt init --upgrade)
+            (cd "${{ env.TARGET_ENV }}/$MODULE" && terragrunt init --upgrade)
           done
 
       - name: Validate all modules
@@ -562,49 +499,40 @@ jobs:
           set -euo pipefail
           for MODULE in vpc eks; do
             echo "── validate ${{ env.TARGET_ENV }}/$MODULE ──"
-            (cd ${{ env.TARGET_ENV }}/$MODULE && terragrunt validate)
+            (cd "${{ env.TARGET_ENV }}/$MODULE" && terragrunt validate)
           done
 
       - name: Apply VPC
         run: |
           set -euo pipefail
-          cd ${{ env.TARGET_ENV }}/vpc
+          cd "${{ env.TARGET_ENV }}/vpc"
           terragrunt apply --non-interactive --auto-approve
 
       - name: Apply EKS
         run: |
           set -euo pipefail
-          cd ${{ env.TARGET_ENV }}/eks
+          cd "${{ env.TARGET_ENV }}/eks"
           terragrunt apply --non-interactive --auto-approve
 
-      - name: Configure Kubeconfig
-        run: |
-          set -euo pipefail
-          CLUSTER_NAME=$(cd ${{ env.TARGET_ENV }}/eks && terragrunt output -raw eks_name)
-          echo "Cluster: $CLUSTER_NAME"
-          rm -f ~/.kube/config
-          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region eu-west-1
-          sleep 5
-          kubectl auth can-i get nodes
-          kubectl get nodes
+      - name: Configure kubeconfig
+        uses: ./.github/actions/eks-kubeconfig
+        with:
+          environment: ${{ env.TARGET_ENV }}
+          aws-region:  eu-west-1
 
       - name: Apply Kubernetes Addons
-        run: |
-          set -euo pipefail
-          cd ${{ env.TARGET_ENV }}/kubernetes-addons
-          terragrunt apply --non-interactive --auto-approve
         env:
           GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd "${{ env.TARGET_ENV }}/kubernetes-addons"
+          terragrunt apply --non-interactive --auto-approve
 
 # =============================================================================
 # JOB 4: Promote to next environment
-# After a successful deploy, triggers the next environment.
-#   Dev     → fires repository_dispatch trigger-staging
-#   Staging → fires repository_dispatch trigger-prod
-#   Prod    → no-op (end of pipeline)
-#
-# Using repository_dispatch instead of a push trigger means adding new
-# environment configs to main never accidentally triggers a deploy.
+# Dev success → trigger-staging
+# Staging success → trigger-prod
+# Prod → no-op (end of pipeline)
 # =============================================================================
   promote:
     name: Promote to next environment
@@ -637,19 +565,12 @@ jobs:
           set -euo pipefail
           NEXT="${{ steps.next.outputs.env }}"
           SHA="${{ needs.resolve-env.outputs.sha }}"
-          NEXT_EVENT="trigger-${NEXT,,}"  # trigger-staging or trigger-prod
+          NEXT_EVENT="trigger-$(echo $NEXT | tr '[:upper:]' '[:lower:]')"
 
           echo "Promoting ${{ env.TARGET_ENV }} → $NEXT (event: $NEXT_EVENT, sha: $SHA)"
 
-          PAYLOAD=$(cat <<EOF
-          {
-            "event_type": "${NEXT_EVENT}",
-            "client_payload": {
-              "sha": "${SHA}"
-            }
-          }
-          EOF
-          )
+          PAYLOAD=$(printf '{"event_type":"%s","client_payload":{"sha":"%s"}}' \
+            "$NEXT_EVENT" "$SHA")
 
           HTTP_STATUS=$(curl -s -o /tmp/dispatch-response.json -w "%{http_code}" \
             -X POST \

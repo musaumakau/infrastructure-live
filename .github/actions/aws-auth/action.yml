@@ -1,0 +1,27 @@
+name: AWS Auth
+description: >
+  Configures AWS credentials via OIDC. No long-lived keys.
+  Mirrors .github/actions/aws-auth in infrastructure-modules.
+
+inputs:
+  role-arn:
+    description: 'IAM role ARN to assume via OIDC'
+    required: true
+  aws-region:
+    description: 'AWS region'
+    required: false
+    default: 'eu-west-1'
+  session-name-suffix:
+    description: 'Suffix appended to the session name for traceability'
+    required: false
+    default: 'deploy'
+
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a  # v4.3.1
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region:     ${{ inputs.aws-region }}
+        role-session-name: "github-actions-${{ inputs.session-name-suffix }}"
