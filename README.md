@@ -80,7 +80,7 @@ Before every deploy, the gate job runs per module:
 1. Fetches the plan manifest from S3, keyed by commit SHA
 2. Re-plans against live state
 3. Compares resource addresses and actions against what was reviewed on the PR
-4. Phase 2 (v2 manifests): checks critical property drift for `aws_security_group`, `aws_iam_role`, `aws_s3_bucket`
+4. For security-sensitive resource types (`aws_security_group`, `aws_iam_role`, `aws_s3_bucket`), also checks for critical property drift — ingress rules, IAM policies, encryption config, and public access settings
 
 Environment-specific drift thresholds:
 
@@ -160,7 +160,7 @@ All setup logic is extracted into composite actions. No copy-paste across jobs.
 |-----------|---------|
 | EKS | Cluster with IRSA, private endpoint, logging enabled |
 | VPC | Public/private subnets, NAT gateway, IGW |
-| Kubernetes Addons | CoreDNS, Cluster Autoscaler, Metrics Server, Grafana |
+| Kubernetes Addons | AWS Load Balancer Controller, Cert Manager, Cluster Autoscaler, EBS CSI Driver, External DNS, External Secrets, KEDA, Kube Prometheus Stack (Grafana, Prometheus, Alertmanager), Loki, Metrics Server |
 | Cloud | AWS `eu-west-1` |
 | IaC | Terraform `1.7.5`, Terragrunt `0.84.1` |
 
