@@ -1,44 +1,157 @@
-name: Destroy Infra
+# =============================================================================
+# Terragrunt Destroy — infrastructure-live
+# =============================================================================
+#
+# Destroys infrastructure in the target environment in reverse deploy order:
+#   kubernetes-addons → EKS → VPC
+#
+# APPROVAL GATES:
+#   Dev     → no gate, runs immediately
+#   Staging → staging-approval environment (required reviewers)
+#   Prod    → production-approval environment (required reviewers)
+#
+# Destroy is more dangerous than deploy — it is irreversible.
+# Staging and Prod both require explicit human approval before anything runs.
+#
+# TRIGGERS:
+#   workflow_dispatch — manual only, always intentional
+#
+# CONCURRENCY:
+#   Shares the same concurrency group as terragrunt-deploy.yml per environment.
+#   A destroy and a deploy can never run simultaneously against the same env.
+#
+# COMPOSITE ACTIONS (all under .github/actions/):
+#   aws-auth         — OIDC credential configuration (no long-lived keys)
+#   terragrunt-setup — Terraform + Terragrunt installation
+#
+# REQUIRED SECRETS:
+#   REPO_DISPATCH_PAT      — PAT for cross-repo operations
+#   GRAFANA_ADMIN_PASSWORD — passed through to kubernetes-addons
+#
+# =============================================================================
+
+name: Terragrunt Destroy
+
 on:
-  workflow_dispatch:  # manual trigger from GitHub UI
-permissions:
-        id-token: write
-        contents: read
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment to destroy (Dev / Staging / Prod)'
+        required: true
+        type: choice
+        options: [Dev, Staging, Prod]
+      confirm:
+        description: 'Type the environment name to confirm (e.g. Dev)'
+        required: true
+
+# Shares concurrency group with deploy — destroy and deploy never run together
+concurrency:
+  group: "terragrunt-deploy-${{ github.ref }}"
+  cancel-in-progress: false
+
+permissions: {}
+
 jobs:
-  destroy:
+# =============================================================================
+# JOB 1: Validate confirmation input
+# Guards against accidental triggers — confirmation must match the environment.
+# =============================================================================
+  validate:
+    name: Validate Confirmation
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: eu-west-1 
-      REPO_DISPATCH_PAT: ${{ secrets.REPO_DISPATCH_PAT }}
+
+    permissions:
+      contents: read
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Configure AWS Credentials with OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::649203810550:role/EksOIDCRole
-          aws-region: eu-west-1
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-            terraform_version: 1.7.5    
-      - name: Install Terragrunt
+      - name: Check confirmation matches environment
         run: |
-          curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/v0.58.14/terragrunt_linux_amd64
-          chmod +x terragrunt
-          sudo mv terragrunt /usr/local/bin/
-      - name: Remove Terraform Lock Files
+          set -euo pipefail
+          ENV="${{ inputs.environment }}"
+          CONFIRM="${{ inputs.confirm }}"
+
+          if [ "$CONFIRM" != "$ENV" ]; then
+            echo "::error::Confirmation mismatch — you typed '$CONFIRM' but selected environment is '$ENV'"
+            echo "::error::Re-run and type the environment name exactly to confirm"
+            exit 1
+          fi
+
+          echo "Confirmation matched — proceeding with $ENV destroy"
+
+# =============================================================================
+# JOB 2: Destroy
+# Tears down kubernetes-addons → EKS → VPC in order.
+# Targets staging-approval or production-approval environment for Staging/Prod.
+# GitHub pauses the job and notifies required reviewers before anything runs.
+# =============================================================================
+  destroy:
+    name: "Destroy [${{ inputs.environment }}]"
+    runs-on: ubuntu-latest
+    needs: validate
+    timeout-minutes: 60
+
+    # Staging and Prod require explicit approval before the job starts.
+    # Dev runs immediately — no gate.
+    environment: >-
+      ${{ inputs.environment == 'Prod' && 'production-approval' ||
+          inputs.environment == 'Staging' && 'staging-approval' || '' }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      TARGET_ENV:        ${{ inputs.environment }}
+      REPO_DISPATCH_PAT: ${{ secrets.REPO_DISPATCH_PAT }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: AWS auth
+        uses: ./.github/actions/aws-auth
+        with:
+          role-arn:            arn:aws:iam::649203810550:role/EksOIDCRole
+          aws-region:          eu-west-1
+          session-name-suffix: "destroy-${{ inputs.environment }}-${{ github.run_id }}"
+
+      - name: Terraform + Terragrunt setup
+        uses: ./.github/actions/terragrunt-setup
+        with:
+          terraform-version:  '1.7.5'
+          terragrunt-version: '0.84.1'
+
+      - name: Remove Terraform lock files
         run: |
-          echo "Removing all .terraform.lock.hcl files..."
-          find . -name ".terraform.lock.hcl" -type f -delete
-          echo "Lock files removed successfully"
-      
-      - name: Destroy kubernetes-addons
-        working-directory: Dev/kubernetes-addons
-        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+          set -euo pipefail
+          echo "Removing .terraform.lock.hcl files under ${{ env.TARGET_ENV }}..."
+          find "${{ env.TARGET_ENV }}" -name ".terraform.lock.hcl" -type f -delete
+          echo "Lock files removed"
+
+      - name: Destroy Kubernetes Addons
+        env:
+          GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd "${{ env.TARGET_ENV }}/kubernetes-addons"
+          terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+
       - name: Destroy EKS
-        working-directory: Dev/eks
-        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+        run: |
+          set -euo pipefail
+          cd "${{ env.TARGET_ENV }}/eks"
+          terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+
       - name: Destroy VPC
-        working-directory: Dev/vpc
-        run: terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+        run: |
+          set -euo pipefail
+          cd "${{ env.TARGET_ENV }}/vpc"
+          terragrunt run-all destroy --terragrunt-non-interactive -auto-approve
+
+      - name: Destroy summary
+        run: |
+          echo "::notice::Destroy complete — ${{ env.TARGET_ENV }} infrastructure has been torn down"
